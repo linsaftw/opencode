@@ -601,7 +601,7 @@ export namespace MessageV2 {
           }
         }
         if (content !== undefined) {
-          result.push({ id: msg.info.id, role: "user", content })
+          result.push({ id: msg.info.id, role: "user", content } as UIMessage)
         }
       }
 
@@ -613,7 +613,7 @@ export namespace MessageV2 {
           continue
         }
 
-        const msg_out: UIMessage = { id: msg.info.id, role: "assistant", content: [] }
+        const msg_out = { id: msg.info.id, role: "assistant" as const, content: [] as Array<unknown> }
         for (const p of msg.parts) {
           if (p.type === "text") {
             msg_out.content.push({ type: "text", text: p.text, ...(diff ? {} : { providerMetadata: p.metadata }) })
@@ -667,27 +667,27 @@ export namespace MessageV2 {
             msg_out.content.push({ type: "reasoning", text: p.text, ...(diff ? {} : { providerMetadata: p.metadata }) })
           }
         }
-        if (Array.isArray(msg_out.content) && msg_out.content.length > 0) {
-          result.push(msg_out)
+        if (msg_out.content.length > 0) {
+          result.push(msg_out as UIMessage)
           if (media.length > 0) {
             result.push({
               id: MessageID.ascending(),
               role: "user",
               content: [{ type: "text", text: "Attached image(s) from tool result:" }, ...media.map((a) => ({ type: "file" as const, url: a.url, mediaType: a.mime }))],
-            })
+            } as UIMessage)
           }
         }
       }
     }
 
     const tools = Object.fromEntries(Array.from(names).map((name) => [name, { toModelOutput }]))
-    const isValid = (msg: UIMessage) => {
-      const c = msg.content
+    const isValid = (msg: unknown) => {
+      const obj = msg as { content?: unknown }
+      const c = obj.content
       return c !== undefined && (typeof c === "string" ? c.length > 0 : Array.isArray(c) && c.length > 0 && c.some((p) => p.type !== "step-start"))
     }
     return convertToModelMessages(result.filter(isValid), {
-      //@ts-expect-error
-      tools,
+      tools: tools as any,
     })
   }
 
@@ -802,7 +802,7 @@ export namespace MessageV2 {
         return new MessageV2.AuthError(
           {
             providerID: ctx.providerID,
-            message: e.message,
+            message: (e as Error).message,
           },
           { cause: e },
         ).toObject()
