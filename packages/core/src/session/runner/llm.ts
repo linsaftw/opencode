@@ -275,6 +275,7 @@ const layer = Layer.effect(
           .primary({
             session: loaded.session,
             agent: loaded.agent.id,
+            effort: loaded.agent.info.effort,
             model: loaded.model,
             tools: loaded.tools,
             system: transcript.system,

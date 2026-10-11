@@ -49,6 +49,7 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
   return decodeAgent(
     JSON.stringify({
       model: modelSelection(info.model, info.variant),
+      effort: info.effort,
       request: Object.keys(body).length ? { body } : undefined,
       system: info.prompt,
       description: info.description,
