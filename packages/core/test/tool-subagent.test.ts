@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
 import { AIError, InvalidRequestError, LanguageModel, LLMEvent } from "@opencode/ai/effect"
+import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import path from "path"
@@ -153,6 +154,45 @@ const replacements = [
 const productionIt = testEffect(AppNodeBuilder.build(nodes, replacements))
 const it = testEffect(
   AppNodeBuilder.build(nodes, [...replacements, PluginSupervisor.node.replace(subagentPluginSupervisor)]),
+)
+
+// Captures the plugin's session hooks so the description hook can be triggered directly.
+type SessionHook = (event: SessionHooks["context"]) => Effect.Effect<void>
+const capturedSessionHooks = new Map<string, SessionHook>()
+const hookSupervisor = makeLocationNode({
+  name: "test/subagent-hook-plugins",
+  layer: Layer.effectDiscard(
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      yield* registerToolPlugin(
+        SubagentTool.Plugin,
+        {
+          session: {
+            hook: (name, callback) =>
+              Effect.sync(() => {
+                capturedSessionHooks.set(name, callback as unknown as SessionHook)
+                return { dispose: Effect.void }
+              }),
+          },
+        },
+        (name, callback) => hooks.register("tool", name, callback),
+      )
+    }),
+  ),
+  deps: [
+    Agent.node,
+    Config.node,
+    Model.node,
+    Permission.node,
+    Session.node,
+    Job.node,
+    SubagentJob.node,
+    Tool.node,
+    PluginHooks.node,
+  ],
+})
+const hookIt = testEffect(
+  AppNodeBuilder.build(nodes, [...replacements, PluginSupervisor.node.replace(hookSupervisor)]),
 )
 const completionLLM = TestLLM.testLayer({ fallback: TestLLM.text(childText, "completion") })
 const completionIt = testEffect(
@@ -915,6 +955,160 @@ const reportingFixture = () =>
     })
     return { parent, sessions, call, notices }
   })
+
+describe("SubagentTool.batch", () => {
+  it.live("spawns all requested subagents in one call and returns them in order", () =>
+    tmpdirScoped().pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const progress: Tool.Metadata[] = []
+
+          const settled = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            progress: (update) => Effect.sync(() => progress.push(update)),
+            call: {
+              type: "tool-call",
+              id: "call-batch",
+              name: SubagentTool.batchName,
+              input: {
+                tasks: [
+                  { agent: "reviewer", description: "review a", prompt: "a", model: "", sessionID: "" },
+                  { agent: "reviewer", description: "review b", prompt: "b" },
+                  { agent: "fallback", description: "review c", prompt: "c" },
+                ],
+              },
+            },
+          })
+
+          expect(settled.status).toBe("completed")
+          expect(Array.isArray(settled.output)).toBe(true)
+          const results = settled.output as Array<{ sessionID: string; status: string; output: string }>
+          expect(results).toHaveLength(3)
+          expect(results.map((result) => result.status)).toEqual(["running", "running", "running"])
+          const ids = results.map((result) => Session.ID.make(result.sessionID))
+          expect(new Set(ids).size).toBe(3)
+          expect(results[0]?.output).toContain(`sessionID: ${ids[0]}`)
+          const children = yield* Effect.all(ids.map((id) => sessions.get(id)))
+          expect(children.map((child) => child.parentID)).toEqual([parent.id, parent.id, parent.id])
+          expect(children[0]).toMatchObject({ agent: "reviewer", model: childModel })
+          expect(children[2]?.agent).toBe(Agent.ID.make("fallback"))
+          expect(progress).toHaveLength(3)
+          expect((yield* sessions.list({ parentID: parent.id })).data).toHaveLength(3)
+        }),
+      ),
+    ),
+  )
+
+  it.live("reports a failed task without dropping the valid ones", () =>
+    tmpdirScoped().pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+
+          const settled = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-batch-failure",
+              name: SubagentTool.batchName,
+              input: {
+                tasks: [
+                  { agent: "reviewer", description: "first", prompt: "first" },
+                  { agent: "missing", description: "bad", prompt: "bad" },
+                  { agent: "fallback", description: "third", prompt: "third" },
+                ],
+              },
+            },
+          })
+
+          expect(settled).toMatchObject({ status: "completed" })
+          const results = settled.output as Array<{ sessionID: string; status: string; output: string }>
+          expect(results).toHaveLength(3)
+          expect(results[1]?.status).toBe("error")
+          expect(results[1]?.output).toBe("Unknown agent: missing")
+          expect(results[1]?.sessionID).toBe("")
+          expect(results[0]?.status).toBe("running")
+          expect(results[2]?.status).toBe("running")
+          expect((yield* sessions.list({ parentID: parent.id })).data).toHaveLength(2)
+        }),
+      ),
+    ),
+  )
+
+  it.live("rejects an empty tasks array", () =>
+    tmpdirScoped().pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+
+          expect(
+            yield* executeTool(registry, {
+              sessionID: parent.id,
+              ...toolIdentity,
+              call: { type: "tool-call", id: "call-empty-batch", name: SubagentTool.batchName, input: { tasks: [] } },
+            }),
+          ).toEqual({
+            status: "error",
+            error: { type: "tool.execution", message: "subagent_batch requires at least one task" },
+          })
+        }),
+      ),
+    ),
+  )
+
+  hookIt.live("advertises available subagents for both tools", () =>
+    tmpdirScoped().pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(parent.location)
+          const definitions: Record<string, { description: string; input: Record<string, never> }> = {
+            [SubagentTool.name]: { description: "single", input: {} },
+            [SubagentTool.batchName]: { description: "batch", input: {} },
+          }
+
+          const hook = capturedSessionHooks.get("context")
+          expect(hook).toBeDefined()
+          if (!hook) return yield* Effect.die("Missing session context hook")
+          yield* hook({
+            sessionID: parent.id,
+            agent: toolIdentity.agent,
+            model: parentModel,
+            system: [],
+            messages: [],
+            options: {},
+            tools: definitions,
+          })
+
+          for (const name of [SubagentTool.name, SubagentTool.batchName]) {
+            expect(definitions[name]?.description).toContain("Available subagents:")
+            expect(definitions[name]?.description).toContain("- reviewer:")
+          }
+        }),
+      ),
+    ),
+  )
+})
 
 describe("SubagentTool reporting", () => {
   completionIt.live("reports the child's final answer to the parent", () =>
