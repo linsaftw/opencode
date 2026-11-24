@@ -226,11 +226,27 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       const bound = server.address
       if (lifecycle !== undefined && NetAddress.isInetAddress(bound)) {
         const listenerAddress = NetAddress.formatInet(bound)
+        let previousTickAt = Date.now()
+        let previousFdCount: number | undefined
         yield* Effect.forkScoped(
-          Effect.sync(() => ServiceDiagnostics.heartbeatFields(lifecycle, listenerAddress, process.memoryUsage())).pipe(
-            Effect.tap((fields) => Effect.logInfo("service heartbeat", fields)),
-            Effect.repeat(Schedule.spaced(ServiceDiagnostics.HEARTBEAT_INTERVAL)),
-          ),
+          Effect.gen(function* () {
+            const now = Date.now()
+            const gapMs = ServiceDiagnostics.stallGapMs(previousTickAt, now)
+            previousTickAt = now
+            const fd = yield* Effect.promise(() => ServiceDiagnostics.sampleFileDescriptors())
+            const memory = process.memoryUsage()
+            yield* Effect.logInfo(
+              "service heartbeat",
+              ServiceDiagnostics.heartbeatFields(lifecycle, listenerAddress, memory, now, fd, previousFdCount),
+            )
+            // Only a resumed tick can observe a stall; no second timer is introduced.
+            if (ServiceDiagnostics.isStalledGap(gapMs))
+              yield* Effect.logWarning(
+                "service event loop stalled",
+                ServiceDiagnostics.stallWarningFields(lifecycle, memory, fd, gapMs, now),
+              )
+            previousFdCount = fd?.total
+          }).pipe(Effect.repeat(Schedule.spaced(ServiceDiagnostics.HEARTBEAT_INTERVAL))),
         )
       }
       return yield* options.mode === "service"
