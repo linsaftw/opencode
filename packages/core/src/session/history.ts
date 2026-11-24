@@ -99,20 +99,33 @@ export const withParts = Effect.fnUntraced(function* (
 ) {
   const assistantIDs = rows.flatMap((row) => (row.type === "assistant" ? [row.id] : []))
   if (assistantIDs.length === 0) return rows
+  const wanted = new Set(assistantIDs)
   const partsByMessage = new Map<SessionMessage.ID, Array<(typeof SessionPartTable.$inferSelect)["data"]>>()
-  for (const ids of DatabaseBatch.batches(assistantIDs, 1)) {
-    const partRows = yield* db
-      .select()
-      .from(SessionPartTable)
-      .where(inArray(SessionPartTable.message_id, ids))
-      .orderBy(asc(SessionPartTable.message_id), asc(SessionPartTable.ordinal))
-      .all()
-      .pipe(Effect.orDie)
-    for (const part of partRows) {
-      const list = partsByMessage.get(part.message_id)
-      if (list) list.push(part.data)
-      else partsByMessage.set(part.message_id, [part.data])
-    }
+  // Only the message id and payload are needed. Reading the other columns would materialize every part's timestamps
+  // and metadata for every history load, which dominates long sessions.
+  // A small read (one message, a page) keeps the targeted lookup. A whole-window read would otherwise issue one
+  // query per 100 message ids; read the session's parts in one index-ordered pass and keep only what was asked for.
+  const partRows =
+    assistantIDs.length <= DatabaseBatch.MaxBoundParameters
+      ? yield* db
+          .select({ message_id: SessionPartTable.message_id, data: SessionPartTable.data })
+          .from(SessionPartTable)
+          .where(inArray(SessionPartTable.message_id, assistantIDs))
+          .orderBy(asc(SessionPartTable.message_id), asc(SessionPartTable.ordinal))
+          .all()
+          .pipe(Effect.orDie)
+      : yield* db
+          .select({ message_id: SessionPartTable.message_id, data: SessionPartTable.data })
+          .from(SessionPartTable)
+          .where(inArray(SessionPartTable.session_id, [...new Set(rows.map((row) => row.session_id))]))
+          .orderBy(asc(SessionPartTable.session_id), asc(SessionPartTable.message_id), asc(SessionPartTable.ordinal))
+          .all()
+          .pipe(Effect.orDie)
+  for (const part of partRows) {
+    if (!wanted.has(part.message_id)) continue
+    const list = partsByMessage.get(part.message_id)
+    if (list) list.push(part.data)
+    else partsByMessage.set(part.message_id, [part.data])
   }
   if (partsByMessage.size === 0) return rows
   return rows.map((row) => {
