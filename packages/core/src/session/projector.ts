@@ -268,30 +268,31 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
     const assistantRows = rows.filter((row) => row.type === "assistant")
     if (assistantRows.length > 0) {
       const idMap = new Map(assistantRows.map((row) => [row.id, forkedID(row.seq)]))
-      const storedParts = yield* Effect.forEach(DatabaseBatch.batches([...idMap.keys()], 1, 1), (ids) =>
-        db
-          .select()
-          .from(SessionPartTable)
-          .where(and(eq(SessionPartTable.session_id, event.data.parentID), inArray(SessionPartTable.message_id, ids)))
-          .orderBy(asc(SessionPartTable.message_id), asc(SessionPartTable.ordinal))
-          .all()
-          .pipe(Effect.orDie),
-      ).pipe(Effect.map((batches) => batches.flat()))
-      const partValues: Array<typeof SessionPartTable.$inferInsert> = yield* Effect.forEach(storedParts, (part) =>
-        Effect.gen(function* () {
-          const data = media ? SessionBlob.split(part.data) : undefined
-          if (data?.moved) yield* SessionBlob.save(db, data.blobs)
-          return {
-            message_id: idMap.get(part.message_id)!,
-            session_id: event.data.sessionID,
-            ordinal: part.ordinal,
-            type: part.type,
-            call_id: part.call_id,
-            time_created: part.time_created,
-            time_updated: part.time_updated,
-            data: data?.data ?? part.data,
-          }
-        }),
+      // One index-ordered read of the parent's parts instead of a query per batch of message ids.
+      const storedParts = yield* db
+        .select()
+        .from(SessionPartTable)
+        .where(eq(SessionPartTable.session_id, event.data.parentID))
+        .orderBy(asc(SessionPartTable.message_id), asc(SessionPartTable.ordinal))
+        .all()
+        .pipe(Effect.orDie)
+      const partValues: Array<typeof SessionPartTable.$inferInsert> = yield* Effect.forEach(
+        storedParts.filter((part) => idMap.has(part.message_id)),
+        (part) =>
+          Effect.gen(function* () {
+            const data = media ? SessionBlob.split(part.data) : undefined
+            if (data?.moved) yield* SessionBlob.save(db, data.blobs)
+            return {
+              message_id: idMap.get(part.message_id)!,
+              session_id: event.data.sessionID,
+              ordinal: part.ordinal,
+              type: part.type,
+              call_id: part.call_id,
+              time_created: part.time_created,
+              time_updated: part.time_updated,
+              data: data?.data ?? part.data,
+            }
+          }),
       )
       yield* insertParts(db, partValues)
       // Split parents' envelopes carry no content, so the parts' refs are recorded for each forked message here.
