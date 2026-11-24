@@ -149,13 +149,16 @@ export function heartbeatFields(
 /** Reads /proc/self/fd asynchronously and returns coarse counts, or undefined off Linux/on error. */
 export async function sampleFileDescriptors(directory = "/proc/self/fd"): Promise<FdBreakdown | undefined> {
   if (process.platform !== "linux") return undefined
+  let entries: string[]
   try {
-    const entries = await readdir(directory)
-    const targets = await Promise.all(entries.map((entry) => readlink(join(directory, entry))))
-    return categorizeFdTargets(targets)
+    entries = await readdir(directory)
   } catch {
     return undefined
   }
+  // Descriptors churn while the directory is read: an entry can vanish before its readlink.
+  // Drop those failures individually so one closed descriptor cannot suppress the whole sample.
+  const targets = await Promise.all(entries.map((entry) => readlink(join(directory, entry)).catch(() => undefined)))
+  return categorizeFdTargets(targets.filter((target): target is string => target !== undefined))
 }
 
 /** Pure helper: group readlink targets into privacy-safe counts. */

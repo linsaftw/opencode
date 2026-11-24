@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test"
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { ServiceDiagnostics } from "../src/service-diagnostics"
 
 const meta = { pid: 2187515, version: "2.4.1", registrationID: "1ff87710", port: 49374 }
@@ -80,6 +83,39 @@ test("FD targets become coarse counts that never expose paths", () => {
   expect(JSON.stringify(breakdown)).not.toContain("alice")
   expect(JSON.stringify(breakdown)).not.toContain("secret-hash")
   expect(ServiceDiagnostics.categorizeFdTargets([]).total).toBe(0)
+})
+
+test("FD sampling keeps the breakdown when one entry cannot be read", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "opencode-fd-"))
+  try {
+    await Promise.all([
+      symlink("/home/alice/context.db", join(directory, "db")),
+      symlink("socket:[42]", join(directory, "socket")),
+      symlink("/definitely/missing/closed-fd", join(directory, "broken")),
+      // A descriptor that closed after readdir has no link left to read; a non-symlink
+      // entry fails readlink deterministically and exercises the same per-entry catch.
+      writeFile(join(directory, "vanished"), ""),
+    ])
+    expect(await ServiceDiagnostics.sampleFileDescriptors(directory)).toEqual({
+      total: 3,
+      contextDb: 1,
+      contextDbWal: 0,
+      contextDbShm: 0,
+      inotify: 0,
+      pidfd: 0,
+      sockets: 1,
+      pipes: 0,
+      other: 1,
+    })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("FD sampling still returns undefined when the directory cannot be read", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "opencode-fd-"))
+  await rm(directory, { recursive: true, force: true })
+  expect(await ServiceDiagnostics.sampleFileDescriptors(directory)).toBeUndefined()
 })
 
 test("stall gap detection triggers only beyond twice the configured interval", () => {
