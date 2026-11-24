@@ -1,10 +1,32 @@
 /** Privacy-safe diagnostics for the background service process.
  *
  * Records only identifiers, versions, process IDs, counters and coarse reasons. URLs (which can
- * carry credentials), passwords, session IDs and session content are never included.
+ * carry credentials), passwords, session IDs and session content are never included. File
+ * descriptor targets are reduced to category counts before they leave the sampler: raw paths
+ * (which can contain user names or project details) are never logged.
  */
 
+import { readdir, readlink } from "node:fs/promises"
+import { join } from "node:path"
+
 export const HEARTBEAT_INTERVAL = "5 minutes"
+// Millisecond companion to HEARTBEAT_INTERVAL for stall thresholds; keep the two in sync.
+export const HEARTBEAT_INTERVAL_MS = 5 * 60_000
+export const STALL_GAP_FACTOR = 2
+export const STALL_THRESHOLD_MS = STALL_GAP_FACTOR * HEARTBEAT_INTERVAL_MS
+
+/** Counts only; never holds a raw descriptor target such as a database path. */
+export type FdBreakdown = {
+  total: number
+  contextDb: number
+  contextDbWal: number
+  contextDbShm: number
+  inotify: number
+  pidfd: number
+  sockets: number
+  pipes: number
+  other: number
+}
 
 export type ServiceMeta = {
   readonly pid: number
@@ -96,7 +118,14 @@ export function exitFields(state: Lifecycle, exitCode: number | null = state.exi
   }
 }
 
-export function heartbeatFields(state: Lifecycle, address: string, memory: NodeJS.MemoryUsage, now = Date.now()) {
+export function heartbeatFields(
+  state: Lifecycle,
+  address: string,
+  memory: NodeJS.MemoryUsage,
+  now = Date.now(),
+  fd?: FdBreakdown,
+  previousFdCount?: number,
+) {
   return {
     event: "service.heartbeat",
     pid: state.meta.pid,
@@ -110,6 +139,85 @@ export function heartbeatFields(state: Lifecycle, address: string, memory: NodeJ
     heapTotalBytes: memory.heapTotal,
     externalBytes: memory.external,
     arrayBuffersBytes: memory.arrayBuffers,
+    fdCount: fd?.total ?? null,
+    fdBreakdown: fd ?? null,
+    fdPreviousCount: previousFdCount ?? null,
+    fdGrowth: fd !== undefined && previousFdCount !== undefined ? fd.total - previousFdCount : null,
+  }
+}
+
+/** Reads /proc/self/fd asynchronously and returns coarse counts, or undefined off Linux/on error. */
+export async function sampleFileDescriptors(directory = "/proc/self/fd"): Promise<FdBreakdown | undefined> {
+  if (process.platform !== "linux") return undefined
+  try {
+    const entries = await readdir(directory)
+    const targets = await Promise.all(entries.map((entry) => readlink(join(directory, entry))))
+    return categorizeFdTargets(targets)
+  } catch {
+    return undefined
+  }
+}
+
+/** Pure helper: group readlink targets into privacy-safe counts. */
+export function categorizeFdTargets(targets: readonly string[]): FdBreakdown {
+  const breakdown: FdBreakdown = {
+    total: targets.length,
+    contextDb: 0,
+    contextDbWal: 0,
+    contextDbShm: 0,
+    inotify: 0,
+    pidfd: 0,
+    sockets: 0,
+    pipes: 0,
+    other: 0,
+  }
+  for (const target of targets) breakdown[fdCategory(target)]++
+  return breakdown
+}
+
+function fdCategory(target: string): Exclude<keyof FdBreakdown, "total"> {
+  if (target === "anon_inode:inotify") return "inotify"
+  if (target === "anon_inode:[pidfd]") return "pidfd"
+  if (target.startsWith("socket:")) return "sockets"
+  if (target.startsWith("pipe:")) return "pipes"
+  // Linux appends " (deleted)" to readlink results for unlinked files, including WAL files.
+  const name = target.slice(target.lastIndexOf("/") + 1).replace(/ \(deleted\)$/, "")
+  if (name === "context.db") return "contextDb"
+  if (name === "context.db-wal") return "contextDbWal"
+  if (name === "context.db-shm") return "contextDbShm"
+  return "other"
+}
+
+/** Gap between two actual heartbeat ticks; a stalled loop resumes with a larger gap. */
+export function stallGapMs(previousTickAt: number, currentTickAt: number): number {
+  return Math.max(0, currentTickAt - previousTickAt)
+}
+
+/** True only when consecutive ticks were more than twice the configured interval apart. */
+export function isStalledGap(gapMs: number, thresholdMs = STALL_THRESHOLD_MS): boolean {
+  return gapMs > thresholdMs
+}
+
+/** Emitted once the event loop resumes after a missing heartbeat; counts only, no targets. */
+export function stallWarningFields(
+  state: Lifecycle,
+  memory: NodeJS.MemoryUsage,
+  fd: FdBreakdown | undefined,
+  gapMs: number,
+  now = Date.now(),
+) {
+  return {
+    event: "service event loop stalled",
+    pid: state.meta.pid,
+    version: state.meta.version,
+    registrationID: state.meta.registrationID,
+    gapMs,
+    thresholdMs: STALL_THRESHOLD_MS,
+    uptimeSeconds: uptimeSeconds(state, now),
+    rssBytes: memory.rss,
+    heapUsedBytes: memory.heapUsed,
+    fdCount: fd?.total ?? null,
+    fdBreakdown: fd ?? null,
   }
 }
 
