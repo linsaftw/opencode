@@ -1,5 +1,5 @@
 import { blob, sqliteTable, text, integer, index, primaryKey, real, uniqueIndex } from "drizzle-orm/sqlite-core"
-import { sql } from "drizzle-orm"
+import { desc, sql } from "drizzle-orm"
 import { directoryColumn, pathColumn } from "../database/path.js"
 import { ProjectTable } from "../project/sql.js"
 import type { SessionMessage } from "./message.js"
@@ -77,6 +77,15 @@ export const SessionTable = sqliteTable(
     index("session_v2_project_idx").on(table.project_id),
     index("session_v2_workspace_idx").on(table.workspace_id),
     index("session_v2_parent_idx").on(table.parent_id),
+    index("session_v2_root_project_path_updated_idx")
+      .on(table.project_id, table.path, desc(table.time_updated), desc(table.id))
+      .where(sql`${table.parent_id} is null and ${table.time_archived} is null`),
+    // Leading parent_id keeps the default `parent_id IS NULL` list query a seek
+    // instead of a full index scan; SQLite ignores the ordering-only index when
+    // the NULL predicate sits in the partial WHERE clause.
+    index("session_v2_root_updated_idx")
+      .on(table.parent_id, desc(table.time_updated), desc(table.id))
+      .where(sql`${table.time_archived} is null`),
     index("session_v2_time_suspended_idx")
       .on(table.time_suspended)
       .where(sql`${table.time_suspended} is not null`),
