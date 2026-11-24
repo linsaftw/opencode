@@ -11,9 +11,14 @@ import {
   stoppedExitCode,
 } from "./fixture/service-fixture"
 import { accelerate } from "./fixture/service-timing"
+import { completeRestart, releaseRestart, tryBeginRestart } from "../src/service-restart"
+import { defaultEnsureTiming, type EnsureTiming, withEnsureTiming } from "../src/service-timing"
 
 const ensure = accelerate(Service.ensure)
 const stop = accelerate(Service.stop)
+const ensureSlowWindow = accelerate(Service.ensure, { unresponsiveWindow: 2_000, spawnDelay: 5_000 })
+const ensurePatient = accelerate(Service.ensure, { spawnDelay: 5_000 })
+const ensureTolerant = accelerate(Service.ensure, { startingWindow: 2_000, startingFailures: 12, spawnDelay: 5_000 })
 
 test("a concurrent same-version start cannot invalidate a resolved endpoint", async () => {
   await using fixture = await serviceFixture()
@@ -199,6 +204,130 @@ test("evicts an unresponsive registered service before starting its replacement"
   expect(await status(endpoint.url)).toMatchObject({ version: "test", pid: replacement.pid })
 })
 
+test("escalates a ready owner that stops answering after three probes", async () => {
+  await using fixture = await serviceFixture()
+  const registration = fixture.registration
+  const existing = fixture.spawn("hanging", "0", "ready")
+  await fixture.waitForFile()
+  const starts: EnsureReason[] = []
+
+  const endpoint = await run(
+    ensure({
+      file: registration,
+      version: "test",
+      command: fixture.command("delayed", "10"),
+      onStart: (reason) => starts.push(reason),
+    }),
+  )
+  fixture.track((await Bun.file(registration).json()).pid)
+
+  expect((await Bun.file(registration + ".requests").text()).trim().split("\n")).toHaveLength(3)
+  expect(await existing.exited).toBe(stoppedExitCode)
+  expect(starts).toEqual(["missing"])
+  expect(endpoint.url).toBe((await Bun.file(registration).json()).url)
+})
+
+test("a starting owner survives the tolerant timeout window", async () => {
+  await using fixture = await serviceFixture()
+  const registration = fixture.registration
+  const starting = fixture.spawn("recovering", "0", "starting")
+  await fixture.waitForFile()
+  const starts: EnsureReason[] = []
+
+  const endpoint = await run(
+    ensureTolerant({
+      file: registration,
+      version: "test",
+      command: fixture.command("delayed", "10"),
+      onStart: (reason) => starts.push(reason),
+    }),
+  )
+
+  expect((await Bun.file(registration + ".requests").text()).trim().split("\n")).toHaveLength(3)
+  expect(starts).toEqual([])
+  expect(await fixture.signal()).toBeUndefined()
+  expect(starting.exitCode).toBe(null)
+  expect(await fixture.starts()).toHaveLength(0)
+  expect(endpoint.url).toBe((await Bun.file(registration).json()).url)
+})
+
+test("reuses a registered service that answers after a short timeout streak", async () => {
+  await using fixture = await serviceFixture()
+  const registration = fixture.registration
+  const existing = fixture.spawn("recovering")
+  await fixture.waitForFile()
+  const original = await Bun.file(registration).json()
+  const starts: EnsureReason[] = []
+
+  const endpoint = await run(
+    ensureSlowWindow({
+      file: registration,
+      version: "test",
+      command: [],
+      onStart: (reason) => starts.push(reason),
+    }),
+  )
+
+  expect(endpoint.url).toBe(original.url)
+  expect((await Bun.file(registration + ".requests").text()).trim().split("\n")).toHaveLength(3)
+  expect(await fixture.signal()).toBeUndefined()
+  expect(existing.exitCode).toBe(null)
+  expect(await Bun.file(registration).json()).toEqual(original)
+  expect(starts).toEqual([])
+})
+
+test("a healthy answer interleaved into a timeout streak resets it", async () => {
+  await using fixture = await serviceFixture()
+  const registration = fixture.registration
+  const existing = fixture.spawn("intermittent")
+  await fixture.waitForFile()
+  const original = await Bun.file(registration).json()
+  const endpoint = await run(ensurePatient({ file: registration, version: "test", command: [] }))
+  expect(endpoint.url).toBe(original.url)
+  expect(await fixture.signal()).toBeUndefined()
+  expect(existing.exitCode).toBe(null)
+  expect(await Bun.file(registration).json()).toEqual(original)
+})
+
+test("two concurrent ensure calls share one reboot", async () => {
+  await using fixture = await serviceFixture()
+  const registration = fixture.registration
+  const existing = fixture.spawn("hanging")
+  await fixture.waitForFile()
+  const original = await Bun.file(registration).json()
+  const command = fixture.command("delayed", "0")
+  const results = await Promise.all([
+    run(ensure({ file: registration, version: "test", command })),
+    run(ensurePatient({ file: registration, version: "test", command })),
+  ])
+  const signals = (await Bun.file(registration + ".signals").text().catch(() => ""))
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+  if (catchesSigterm) expect(signals).toHaveLength(1)
+  expect(await existing.exited).toBe(stoppedExitCode)
+  expect((await Bun.file(registration + ".starts").text()).trim().split("\n")).toHaveLength(1)
+  const replacement = await Bun.file(registration).json()
+  fixture.track(replacement.pid)
+  expect(replacement.pid).not.toBe(original.pid)
+  for (const result of results) expect(result.url).toBe(replacement.url)
+})
+
+test("restart lock honors the completion cooldown", async () => {
+  await using fixture = await serviceFixture()
+  const clock = { now: 1_000 }
+  const timing: EnsureTiming = { ...defaultEnsureTiming, restartCooldown: 150, now: () => clock.now }
+  const first = await tryBeginRestart(fixture.registration, timing)
+  if (first === undefined) throw new Error("expected to acquire the restart lock")
+  await completeRestart(fixture.registration, first.token, timing)
+  expect(await tryBeginRestart(fixture.registration, timing)).toBeUndefined()
+  clock.now += 150
+  const second = await tryBeginRestart(fixture.registration, timing)
+  if (second === undefined) throw new Error("expected to acquire the restart lock after the cooldown")
+  await releaseRestart(fixture.registration, second.token)
+  expect(await Bun.file(fixture.registration + ".restart").exists()).toBe(false)
+})
+
 test("signals an unresponsive registered service process", async () => {
   await using fixture = await serviceFixture()
   const registration = fixture.registration
@@ -221,7 +350,6 @@ test("stop escalates when the registration disappears before the process exits",
   await run(stop({ file: registration }))
 
   expect(await fixture.signal()).toBe(stopSignal)
-  expect(() => process.kill(original.pid, 0)).toThrow()
   await expectNotListening(original.url)
   expect(await Bun.file(registration).exists()).toBe(false)
   await existing.exited
@@ -232,12 +360,77 @@ test.skipIf(process.platform === "win32")(
   async () => {
     await using fixture = await serviceFixture()
     const registration = fixture.registration
+    const existing = fixture.spawn("lingering", "60000")
+    await fixture.waitForFile()
+    const original = await Bun.file(registration).json()
+
+    try {
+      await expect(
+        run(
+          Service.stop(
+            withEnsureTiming(
+              { file: registration },
+              {
+                stopPollInterval: 5,
+                stopPollAttempts: 20,
+                signal: (pid, name) => {
+                  if (name !== "SIGKILL") process.kill(pid, name)
+                },
+              },
+            ),
+          ),
+        ),
+      ).rejects.toThrow(`Server process ${original.pid} is still running`)
+      expect(await Bun.file(registration + ".signal").text()).toBe("SIGTERM")
+    } finally {
+      existing.kill("SIGKILL")
+      await existing.exited
+    }
+  },
+  15_000,
+)
+
+test.skipIf(process.platform === "win32")(
+  "stop treats an unreaped zombie service process as stopped",
+  async () => {
+    await using fixture = await serviceFixture()
+    const registration = fixture.registration
     fixture.spawnUnreaped("lingering", "60000")
     await fixture.waitForFile()
     const original = await Bun.file(registration).json()
 
-    await expect(run(stop({ file: registration }))).rejects.toThrow(`Server process ${original.pid} is still running`)
-    expect(await Bun.file(registration + ".signal").text()).toBe("SIGTERM")
+    await run(stop({ file: registration }))
+
+    // The zombie remains in the process table until its parent exits, yet the service is stopped.
+    expect(() => process.kill(original.pid, 0)).not.toThrow()
+    await expectNotListening(original.url)
+    expect(await Bun.file(registration).exists()).toBe(false)
+  },
+  15_000,
+)
+
+test.skipIf(process.platform === "win32")(
+  "evicts an unresponsive unreaped service that becomes a zombie",
+  async () => {
+    await using fixture = await serviceFixture()
+    const registration = fixture.registration
+    fixture.spawnUnreaped("hanging")
+    await fixture.waitForFile()
+    const original = await Bun.file(registration).json()
+
+    const endpoint = await run(
+      ensure({
+        file: registration,
+        version: "test",
+        command: fixture.command("delayed", "10"),
+      }),
+    )
+    const replacement = await Bun.file(registration).json()
+    fixture.track(replacement.pid)
+
+    expect(() => process.kill(original.pid, 0)).not.toThrow()
+    expect(replacement.pid).not.toBe(original.pid)
+    expect(endpoint.url).toBe(replacement.url)
   },
   15_000,
 )
@@ -264,7 +457,6 @@ test.skipIf(!catchesSigterm)(
 
       await stopping
 
-      expect(() => process.kill(original.pid, 0)).toThrow()
       await expectNotListening(original.url)
       expect(await Bun.file(registration).json()).toEqual(replacement)
       expect(await status(replacement.url)).toMatchObject({ pid: successor.pid })

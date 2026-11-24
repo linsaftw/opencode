@@ -1,10 +1,12 @@
 import { Effect, FileSystem, Option, Schedule, Schema } from "effect"
 import type { DiscoverOptions, EnsureOptions, StopOptions } from "../service.js"
 import { contenderPool, spawnServiceContender } from "../service-contender.js"
-import { defaultEnsureTiming, ensureTiming, type EnsureTiming } from "../service-timing.js"
+import { defaultEnsureTiming, ensureTiming, type EnsureTiming, unresponsiveThreshold } from "../service-timing.js"
 import { matchesVersion } from "../service-version.js"
 import { PtyHandoff } from "../pty-handoff.js"
 import { decide, fallback, headers, probeResult, same } from "../service-probe.js"
+import { completeRestart, releaseRestart, tryBeginRestart } from "../service-restart.js"
+import { processStopped } from "../service-process.js"
 
 export * from "../service.js"
 export { headers }
@@ -49,7 +51,8 @@ export const incumbent = Effect.fn("service.incumbent")(function* (
 export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOptions = {}) {
   const timing = ensureTiming(options)
   const pool = contenderPool(timing)
-  let timeouts: { readonly info: Info; readonly count: number } | undefined
+  let timeouts: { readonly info: Info; readonly count: number; readonly start: number } | undefined
+  let restartToken: string | undefined
   let announced = false
   const announce = (reason: "missing" | "version-mismatch", previousVersion?: string) =>
     Effect.sync(() => {
@@ -73,22 +76,34 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
     const info = registration.info
     const service = registration.service
     if (registration.timedOut && info !== undefined) {
-      timeouts = {
-        info,
-        count: timeouts !== undefined && same(timeouts.info, info) ? timeouts.count + 1 : 1,
-      }
-      if (timeouts.count >= 3) {
-        yield* announce("missing")
-        yield* Effect.logWarning("Background service is unresponsive; recovery cannot preserve persistent terminals")
-        yield* Effect.tryPromise(() => PtyHandoff.clear(options.file ?? fallback()))
-        yield* terminate(info, options, timing)
-        pool.evict(info.pid)
-        pool.recruitNow()
-        timeouts = undefined
+      const now = Date.now()
+      const streak = timeouts !== undefined && same(timeouts.info, info) ? timeouts : undefined
+      const count = streak === undefined ? 1 : streak.count + 1
+      const start = streak?.start ?? now
+      timeouts = { info, count, start }
+      const threshold = unresponsiveThreshold(timing, info.state === "starting")
+      if (count >= threshold.failures && now - start >= threshold.window) {
+        const acquired = yield* Effect.tryPromise(() => tryBeginRestart(options.file, timing))
+        if (acquired !== undefined) {
+          restartToken = acquired.token
+          yield* announce("missing")
+          yield* Effect.logWarning("Background service is unresponsive; recovery cannot preserve persistent terminals")
+          yield* Effect.tryPromise(() => PtyHandoff.clear(options.file ?? fallback()))
+          yield* terminate(info, options, timing)
+          pool.evict(info.pid)
+          pool.recruitNow()
+          timeouts = undefined
+        }
       }
     } else timeouts = undefined
     if (service !== undefined) {
-      pool.serviceAnswered()
+      // A ready service is the end of this reboot (z in the cooldown window), whoever started it.
+      const token = restartToken
+      if (service.state === "ready" && token !== undefined) {
+        restartToken = undefined
+        yield* Effect.tryPromise(() => completeRestart(options.file, token, timing))
+      }
+      pool.serviceAnswered(service.info.pid, service.state === "ready")
       const decision = decide(service, options)
       if (decision._tag === "fail") return yield* Effect.fail(decision.error)
       if (decision._tag === "reuse") {
@@ -96,11 +111,15 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
         return Option.some(service)
       }
       if (decision._tag === "replace") {
-        yield* announce("version-mismatch", service.version)
-        if (service.state !== "ready")
-          yield* Effect.logWarning("Background service is not ready; replacement cannot preserve persistent terminals")
-        yield* stop({ file: options.file, pty: decision.pty }).pipe(Effect.ignore)
-        pool.evict(service.info.pid)
+        const acquired = yield* Effect.tryPromise(() => tryBeginRestart(options.file, timing))
+        if (acquired !== undefined) {
+          restartToken = acquired.token
+          yield* announce("version-mismatch", service.version)
+          if (service.state !== "ready")
+            yield* Effect.logWarning("Background service is not ready; replacement cannot preserve persistent terminals")
+          yield* stop({ file: options.file, pty: decision.pty }).pipe(Effect.ignore)
+          pool.evict(service.info.pid)
+        }
       }
       return Option.none()
     }
@@ -120,6 +139,11 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
       schedule: Schedule.spaced(timing.pollInterval).pipe(Schedule.upTo({ duration: timing.promiseTimeout })),
     }),
     Effect.ensuring(Effect.sync(() => pool.releaseAll())),
+    Effect.ensuring(
+      Effect.promise(() =>
+        restartToken === undefined ? Promise.resolve() : releaseRestart(options.file, restartToken),
+      ),
+    ),
   )
   if (Option.isNone(found))
     return yield* Effect.fail(pool.failure() ?? new Error("Timed out waiting for the background service to start"))
@@ -144,6 +168,7 @@ export const Info = Schema.Struct({
   version: Schema.optional(Schema.String),
   url: Schema.String,
   pid: Schema.Int.check(Schema.isGreaterThan(0)),
+  state: Schema.optional(Schema.Union([Schema.Literal("starting"), Schema.Literal("ready")])),
   password: Schema.optional(Schema.String),
 })
 
@@ -168,26 +193,26 @@ const registered = Effect.fnUntraced(function* (file?: string, timeout?: number)
 const poll = (timing: EnsureTiming) =>
   Schedule.max([Schedule.spaced(timing.stopPollInterval), Schedule.recurs(timing.stopPollAttempts)])
 
-const signal = (pid: number, name: NodeJS.Signals) =>
-  Effect.try({ try: () => process.kill(pid, name), catch: (cause) => cause }).pipe(Effect.ignore)
+const signal = (pid: number, name: NodeJS.Signals, timing: EnsureTiming) =>
+  Effect.try({
+    try: () => (timing.signal ? timing.signal(pid, name) : process.kill(pid, name)),
+    catch: (cause) => cause,
+  }).pipe(Effect.ignore)
 
 const stopped = Effect.fnUntraced(function* (pid: number) {
-  const running = yield* Effect.try({ try: () => process.kill(pid, 0), catch: () => false }).pipe(
-    Effect.orElseSucceed(() => false),
-  )
-  if (!running) return true
+  if (yield* Effect.promise(() => processStopped(pid))) return true
   return yield* Effect.fail(new Error(`Server process ${pid} is still running`))
 })
 
 const terminate = Effect.fnUntraced(function* (info: Info, options: { readonly file?: string }, timing: EnsureTiming) {
   const current = yield* read(options.file)
   if (current === undefined || !same(current, info)) return
-  yield* signal(info.pid, "SIGTERM")
+  yield* signal(info.pid, "SIGTERM", timing)
   const done = yield* stopped(info.pid).pipe(Effect.retry(poll(timing)), Effect.option)
   // The registration can disappear or change hands before this process exits. Only the PID we
   // signalled can tell us whether it has stopped, so escalate based on that process.
   if (Option.isNone(done)) {
-    yield* signal(info.pid, "SIGKILL")
+    yield* signal(info.pid, "SIGKILL", timing)
     yield* stopped(info.pid).pipe(Effect.retry(poll(timing)))
   }
   const latest = yield* read(options.file)
