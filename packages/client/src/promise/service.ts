@@ -7,6 +7,7 @@ import { PtyHandoff } from "../pty-handoff.js"
 import { decide, fallback, headers, probeResult, same } from "../service-probe.js"
 import { completeRestart, releaseRestart, tryBeginRestart } from "../service-restart.js"
 import { processStopped } from "../service-process.js"
+import { terminationFields, type TerminationContext } from "../service-diagnostics.js"
 
 export * from "../service.js"
 export { fallback, headers }
@@ -69,7 +70,12 @@ export async function ensure(options: EnsureOptions = {}): Promise<Endpoint> {
             announce("missing")
             console.warn("Background service is unresponsive; recovery cannot preserve persistent terminals")
             await PtyHandoff.clear(options.file ?? fallback())
-            await terminate(registration.info, options, timing)
+            await terminate(registration.info, options, timing, {
+              cause: "unresponsive",
+              streak: count,
+              windowMs: now - start,
+              restartToken,
+            })
             pool.evict(registration.info.pid)
             pool.recruitNow()
             timeouts = undefined
@@ -99,7 +105,10 @@ export async function ensure(options: EnsureOptions = {}): Promise<Endpoint> {
             announce("version-mismatch", service.version)
             if (service.state !== "ready")
               console.warn("Background service is not ready; replacement cannot preserve persistent terminals")
-            await stop({ file: options.file, pty: decision.pty }).catch(() => undefined)
+            await stop(
+              { file: options.file, pty: decision.pty },
+              { cause: "version-mismatch", previousVersion: service.version, restartToken },
+            ).catch(() => undefined)
             pool.evict(service.info.pid)
           }
         }
@@ -120,7 +129,7 @@ export async function ensure(options: EnsureOptions = {}): Promise<Endpoint> {
 }
 
 /** Stop the registered local service. */
-export async function stop(options: StopOptions = {}) {
+export async function stop(options: StopOptions = {}, context: TerminationContext = { cause: "explicit-stop" }) {
   const info = await read(options.file)
   // Terminal handoff is best-effort; it must never keep the old service running.
   await (
@@ -128,7 +137,7 @@ export async function stop(options: StopOptions = {}) {
       ? PtyHandoff.prepare(options.file ?? fallback(), info, defaultEnsureTiming.requestTimeout)
       : PtyHandoff.clear(options.file ?? fallback())
   ).catch((cause: unknown) => console.warn("Failed to prepare persistent terminals for replacement", cause))
-  if (info !== undefined) await terminate(info, options, ensureTiming(options))
+  if (info !== undefined) await terminate(info, options, ensureTiming(options), context)
 }
 
 async function read(file?: string) {
@@ -165,13 +174,21 @@ async function waitUntilStopped(pid: number, timing: EnsureTiming) {
   return false
 }
 
-async function terminate(info: Info, options: { readonly file?: string }, timing: EnsureTiming) {
+async function terminate(
+  info: Info,
+  options: { readonly file?: string },
+  timing: EnsureTiming,
+  context: TerminationContext,
+) {
   const current = await read(options.file)
   if (current === undefined || !same(current, info)) return
+  const fields = (name: "SIGTERM" | "SIGKILL") => terminationFields(info, context, name)
+  console.warn("Terminating background service", fields("SIGTERM"))
   signal(info.pid, "SIGTERM", timing)
   // The registration can disappear or change hands before this process exits. Only the PID we
   // signalled can tell us whether it has stopped, so escalate based on that process.
   if (!(await waitUntilStopped(info.pid, timing))) {
+    console.warn("Escalating background service termination", fields("SIGKILL"))
     signal(info.pid, "SIGKILL", timing)
     if (!(await waitUntilStopped(info.pid, timing))) throw new Error(`Server process ${info.pid} is still running`)
   }

@@ -2,10 +2,11 @@ export * as ServiceRegistration from "./service-registration"
 
 import { Service, type Info } from "@opencode/client/effect/service"
 import path from "node:path"
-import { Effect, FileSystem, Schedule, Schema } from "effect"
+import { Effect, FileSystem, Option, Schedule, Schema } from "effect"
 import { HttpServer } from "effect/http"
 import { NetAddress } from "effect/net"
 import { OPENCODE_VERSION } from "../version"
+import { ServiceDiagnostics } from "../service-diagnostics"
 
 const infoJson = Schema.fromJsonString(Service.Info)
 const encodeInfo = Schema.encodeEffect(infoJson)
@@ -19,6 +20,7 @@ export const register = Effect.fnUntraced(function* (options: {
   readonly shutdown: Effect.Effect<void>
   /** Completes when the server finishes booting, so clients can tell a hung boot from a hung owner. */
   readonly ready?: Effect.Effect<void>
+  readonly bindFailure?: boolean
 }) {
   const fs = yield* FileSystem.FileSystem
   const temp = options.file + "." + options.id + ".tmp"
@@ -33,6 +35,17 @@ export const register = Effect.fnUntraced(function* (options: {
   } satisfies Info
   const encoded = yield* encodeInfo(info)
   const current = fs.readFileString(options.file).pipe(Effect.flatMap(decodeInfo))
+  const previous = yield* current.pipe(Effect.option)
+  const prior = Option.isSome(previous) ? previous.value : undefined
+  const takeover = ServiceDiagnostics.registrationFields({
+    previousPID: prior?.pid,
+    previousID: prior?.id,
+    previousVersion: prior?.version,
+    newPID: process.pid,
+    newID: info.id,
+    newVersion: info.version,
+    bindFailure: options.bindFailure ?? false,
+  })
   const owns = (found: Info) =>
     found.id === info.id &&
     found.version === info.version &&
@@ -47,6 +60,7 @@ export const register = Effect.fnUntraced(function* (options: {
         fs.rename(temp, options.file).pipe(Effect.retry({ times: 20, schedule: Schedule.spaced("10 millis") })),
       ),
     )
+  yield* Effect.logInfo("service registration write", takeover)
   yield* current.pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("managed service registration check failed; shutting down", {

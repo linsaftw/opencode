@@ -7,6 +7,7 @@ import { PtyHandoff } from "../pty-handoff.js"
 import { decide, fallback, headers, probeResult, same } from "../service-probe.js"
 import { completeRestart, releaseRestart, tryBeginRestart } from "../service-restart.js"
 import { processStopped } from "../service-process.js"
+import { terminationFields, type TerminationContext } from "../service-diagnostics.js"
 
 export * from "../service.js"
 export { headers }
@@ -89,7 +90,12 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
           yield* announce("missing")
           yield* Effect.logWarning("Background service is unresponsive; recovery cannot preserve persistent terminals")
           yield* Effect.tryPromise(() => PtyHandoff.clear(options.file ?? fallback()))
-          yield* terminate(info, options, timing)
+          yield* terminate(info, options, timing, {
+            cause: "unresponsive",
+            streak: count,
+            windowMs: now - start,
+            restartToken,
+          })
           pool.evict(info.pid)
           pool.recruitNow()
           timeouts = undefined
@@ -117,7 +123,10 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
           yield* announce("version-mismatch", service.version)
           if (service.state !== "ready")
             yield* Effect.logWarning("Background service is not ready; replacement cannot preserve persistent terminals")
-          yield* stop({ file: options.file, pty: decision.pty }).pipe(Effect.ignore)
+          yield* stop(
+            { file: options.file, pty: decision.pty },
+            { cause: "version-mismatch", previousVersion: service.version, restartToken },
+          ).pipe(Effect.ignore)
           pool.evict(service.info.pid)
         }
       }
@@ -151,7 +160,10 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
 })
 
 /** Stop the registered local service. */
-export const stop = Effect.fn("service.stop")(function* (options: StopOptions = {}) {
+export const stop = Effect.fn("service.stop")(function* (
+  options: StopOptions = {},
+  context: TerminationContext = { cause: "explicit-stop" },
+) {
   const info = yield* read(options.file)
   // Terminal handoff is best-effort; it must never keep the old service running.
   yield* Effect.tryPromise(() =>
@@ -159,7 +171,7 @@ export const stop = Effect.fn("service.stop")(function* (options: StopOptions = 
       ? PtyHandoff.prepare(options.file ?? fallback(), info, defaultEnsureTiming.requestTimeout)
       : PtyHandoff.clear(options.file ?? fallback()),
   ).pipe(Effect.catch((cause) => Effect.logWarning("Failed to prepare persistent terminals for replacement", cause)))
-  if (info !== undefined) yield* terminate(info, options, ensureTiming(options))
+  if (info !== undefined) yield* terminate(info, options, ensureTiming(options), context)
 })
 
 /** Schema for the local service registration file. */
@@ -204,14 +216,21 @@ const stopped = Effect.fnUntraced(function* (pid: number) {
   return yield* Effect.fail(new Error(`Server process ${pid} is still running`))
 })
 
-const terminate = Effect.fnUntraced(function* (info: Info, options: { readonly file?: string }, timing: EnsureTiming) {
+const terminate = Effect.fnUntraced(function* (
+  info: Info,
+  options: { readonly file?: string },
+  timing: EnsureTiming,
+  context: TerminationContext,
+) {
   const current = yield* read(options.file)
   if (current === undefined || !same(current, info)) return
+  yield* Effect.logWarning("Terminating background service", terminationFields(info, context, "SIGTERM"))
   yield* signal(info.pid, "SIGTERM", timing)
   const done = yield* stopped(info.pid).pipe(Effect.retry(poll(timing)), Effect.option)
   // The registration can disappear or change hands before this process exits. Only the PID we
   // signalled can tell us whether it has stopped, so escalate based on that process.
   if (Option.isNone(done)) {
+    yield* Effect.logWarning("Escalating background service termination", terminationFields(info, context, "SIGKILL"))
     yield* signal(info.pid, "SIGKILL", timing)
     yield* stopped(info.pid).pipe(Effect.retry(poll(timing)))
   }

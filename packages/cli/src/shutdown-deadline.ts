@@ -11,7 +11,10 @@ const LOG_FLUSH = Duration.millis(1_500)
  * for every finalizer, so a finalizer that never finishes would keep the process alive until something kills it.
  * A second signal during teardown reports and exits at once.
  */
-export const install = Effect.fnUntraced(function* (input: Duration.Input = DEADLINE) {
+export const install = Effect.fnUntraced(function* (
+  input: Duration.Input = DEADLINE,
+  onShutdown?: (signal: NodeJS.Signals) => void,
+) {
   const deadline = Duration.fromInputUnsafe(input)
   const fork = Effect.runForkWith(yield* Effect.context<never>())
   let started = false
@@ -29,6 +32,7 @@ export const install = Effect.fnUntraced(function* (input: Duration.Input = DEAD
       yield* Effect.sync(() => process.exit(1))
     })
   const onSignal = (signal: NodeJS.Signals) => {
+    onShutdown?.(signal)
     if (started) {
       process.stderr.write(report(`received ${signal} again during shutdown`, Teardown.pending()))
       process.exit(1)

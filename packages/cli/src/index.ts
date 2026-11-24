@@ -18,6 +18,7 @@ import { EffectFlock } from "@opencode/util/effect-flock"
 import { Heap } from "./heap"
 import { CpuProfile } from "./cpu-profile"
 import { ShutdownDeadline } from "./shutdown-deadline"
+import { ServiceDiagnostics } from "./service-diagnostics"
 
 // Keep requests to the local service off any proxy. Bun reads lowercase `no_proxy` alone whenever it is set, so both
 // spellings get the same merged list.
@@ -114,17 +115,24 @@ const Handlers = Runtime.handlers(Commands, {
 Effect.gen(function* () {
   yield* Heap.listen
   yield* CpuProfile.listen
-  yield* ShutdownDeadline.install()
+  const runFork = Effect.runForkWith(yield* Effect.context<never>())
+  // Hook the existing signal handler; this does not add a competing listener or block termination.
+  yield* ShutdownDeadline.install(undefined, (signal) => {
+    ServiceDiagnostics.noteShutdown("signal", signal)
+    const fields = ServiceDiagnostics.currentShutdownFields()
+    if (fields !== undefined) runFork(Effect.logWarning("service shutdown initiated", fields))
+  })
   // runMain reports every signal interruption as 130; remember a SIGTERM so the exit code is 143.
   process.once("SIGTERM", () => {
     terminated = true
   })
-  const runFork = Effect.runForkWith(yield* Effect.context<never>())
   const uncaughtException = (cause: Error, origin: "uncaughtException" | "unhandledRejection") => {
-    runFork(Effect.logError("uncaught exception", { cause, origin }))
+    ServiceDiagnostics.noteError(origin === "uncaughtException" ? "uncaught-exception" : "unhandled-rejection")
+    runFork(Effect.logError("uncaught exception", ServiceDiagnostics.errorFields(cause, origin)))
   }
   const unhandledRejection = (cause: unknown) => {
-    runFork(Effect.logError("unhandled rejection", { cause }))
+    ServiceDiagnostics.noteError("unhandled-rejection")
+    runFork(Effect.logError("unhandled rejection", ServiceDiagnostics.errorFields(cause, "unhandledRejection")))
   }
   process.on("uncaughtException", uncaughtException)
   process.on("unhandledRejection", unhandledRejection)
