@@ -7,7 +7,7 @@ import { Global } from "@opencode/util/global"
 import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_VERSION } from "./version"
 import { AppProcess } from "@opencode/util/process"
 import { randomBytes, randomUUID } from "node:crypto"
-import { Effect, Option, Redacted, Schema } from "effect"
+import { Effect, Option, Redacted, Schema, Schedule } from "effect"
 import { PersistentPty } from "@opencode/schema/persistent-pty"
 import { HttpServer } from "effect/http"
 import { NetAddress } from "effect/net"
@@ -19,6 +19,7 @@ import { ServiceRegistration } from "./services/service-registration"
 import { RemoteTunnel } from "./services/remote-tunnel"
 import { WebUi } from "./services/web-ui"
 import { databasePath } from "./database-path"
+import { ServiceDiagnostics } from "./service-diagnostics"
 
 export type Mode = "default" | "service" | "stdio"
 
@@ -96,6 +97,12 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
             : randomBytes(32).toString("base64url")
       if (!password) return yield* Effect.fail(new Error("Missing server password"))
       const instanceID = randomUUID()
+      const meta = { pid: process.pid, version: OPENCODE_VERSION, registrationID: instanceID, port }
+      const lifecycle = options.mode === "service" ? ServiceDiagnostics.begin(meta) : undefined
+      if (lifecycle !== undefined) {
+        yield* Effect.logInfo("service process started", ServiceDiagnostics.startedFields(lifecycle))
+        yield* Effect.addFinalizer(() => Effect.logInfo("service process exit", ServiceDiagnostics.exitFields(lifecycle)))
+      }
       const transform = yield* WebUi.handler()
       const remote = { urls: [] as ReadonlyArray<string> }
       const launch = start(
@@ -161,6 +168,8 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
                     id: instanceID,
                     file: serviceOptions.file,
                     shutdown,
+                    // onListen only runs after a successful bind; failed binds are logged below.
+                    bindFailure: false,
                   })
                 }),
             },
@@ -171,6 +180,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
         Effect.catch((error) => {
           if (findIncumbent === undefined || !addressInUse(error)) return Effect.fail(error)
           return Effect.gen(function* () {
+            yield* Effect.logWarning("service listener bind failed", ServiceDiagnostics.bindFailureFields(meta, port))
             const deadline = Date.now() + 15_000
             while (Date.now() < deadline) {
               const found = yield* findIncumbent.pipe(Effect.timeoutOption(deadline - Date.now()))
@@ -213,6 +223,16 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       const url = HttpServer.formatAddress(server.address)
       console.log(options.mode === "stdio" ? JSON.stringify({ url }) : `server listening on ${url}`)
       if (foreground && !environmentPassword) console.log(`server password ${password}`)
+      const bound = server.address
+      if (lifecycle !== undefined && NetAddress.isInetAddress(bound)) {
+        const listenerAddress = NetAddress.formatInet(bound)
+        yield* Effect.forkScoped(
+          Effect.sync(() => ServiceDiagnostics.heartbeatFields(lifecycle, listenerAddress, process.memoryUsage())).pipe(
+            Effect.tap((fields) => Effect.logInfo("service heartbeat", fields)),
+            Effect.repeat(Schedule.spaced(ServiceDiagnostics.HEARTBEAT_INTERVAL)),
+          ),
+        )
+      }
       return yield* options.mode === "service"
         ? server.shutdown
         : options.mode === "stdio"
