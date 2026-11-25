@@ -100,6 +100,7 @@ export const withParts = Effect.fnUntraced(function* (
   const assistantIDs = rows.flatMap((row) => (row.type === "assistant" ? [row.id] : []))
   if (assistantIDs.length === 0) return rows
   const wanted = new Set(assistantIDs)
+  const sessionIDs = [...new Set(rows.map((row) => row.session_id))]
   const partsByMessage = new Map<SessionMessage.ID, Array<(typeof SessionPartTable.$inferSelect)["data"]>>()
   // Only the message id and payload are needed. Reading the other columns would materialize every part's timestamps
   // and metadata for every history load, which dominates long sessions.
@@ -117,7 +118,16 @@ export const withParts = Effect.fnUntraced(function* (
       : yield* db
           .select({ message_id: SessionPartTable.message_id, data: SessionPartTable.data })
           .from(SessionPartTable)
-          .where(inArray(SessionPartTable.session_id, [...new Set(rows.map((row) => row.session_id))]))
+          .where(
+            and(
+              inArray(SessionPartTable.session_id, sessionIDs),
+              // A window starts at a compaction or a page boundary, so the session's older parts are never needed.
+              // Bound the read to the loaded messages' sequence range instead of every part the session ever wrote.
+              sessionIDs.length === 1
+                ? sql`${SessionPartTable.message_id} in (select ${SessionMessageTable.id} from ${SessionMessageTable} where ${SessionMessageTable.session_id} = ${sessionIDs[0]} and ${SessionMessageTable.type} = 'assistant' and ${SessionMessageTable.seq} >= ${Math.min(...rows.map((row) => row.seq))} and ${SessionMessageTable.seq} <= ${Math.max(...rows.map((row) => row.seq))})`
+                : undefined,
+            ),
+          )
           .orderBy(asc(SessionPartTable.session_id), asc(SessionPartTable.message_id), asc(SessionPartTable.ordinal))
           .all()
           .pipe(Effect.orDie)
