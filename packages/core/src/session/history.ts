@@ -167,6 +167,26 @@ const decodeError = (row: typeof SessionMessageTable.$inferSelect) => () =>
 export const decodeMessageRow = (row: typeof SessionMessageTable.$inferSelect) =>
   decode(rowInput(row)).pipe(Effect.mapError(decodeError(row)))
 
+// Every step reloads the whole uncompacted window, and decoding is a pure function of the row, so completed
+// history decodes once. The key hashes the exact decode input (parts and hydrated blobs included), so an edited,
+// pruned or re-hydrated row misses instead of reading stale.
+const decodeCache = new Map<string, { readonly hash: number | bigint; readonly message: SessionMessage.Info }>()
+const decodeCacheLimit = 4000
+
+const decodeMessageRowCached = (row: typeof SessionMessageTable.$inferSelect) => {
+  const hash = Bun.hash(JSON.stringify(row.data) + row.type)
+  const hit = decodeCache.get(row.id)
+  if (hit && hit.hash === hash) return Effect.succeed(hit.message)
+  return decodeMessageRow(row).pipe(
+    Effect.tap((message) =>
+      Effect.sync(() => {
+        if (decodeCache.size >= decodeCacheLimit) decodeCache.delete(decodeCache.keys().next().value!)
+        decodeCache.set(row.id, { hash, message })
+      }),
+    ),
+  )
+}
+
 /** Decodes a row without its blobs, so user files may stay refs. Only for readers that never use file bytes. */
 const decodeStoredRow = (
   row: typeof SessionMessageTable.$inferSelect,
@@ -237,7 +257,7 @@ const messageEntries = Effect.fnUntraced(function* (
     .pipe(Effect.orDie)
   const decoded = yield* Effect.forEach(
     yield* SessionBlob.hydrate(db, yield* withParts(db, rows)),
-    (row) => decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+    (row) => decodeMessageRowCached(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
     { concurrency: 1 },
   )
   // A window that cannot replay leaves nothing to start from, so read from the compaction before it.
