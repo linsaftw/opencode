@@ -23,3 +23,9 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - Scouts: 22 persistence (top fix: single-statement event_sequence upsert in bus.ts, deferred: touches event ordering), 23 fanout, 24 skill-scan memo design (deferred: global cache correctness hinges on watcher events).
 - REJECTED: unit 25 yield during SSE fanout (can reorder events across concurrent publishes).
 - Observed after cycle 2 install: service 31 min up, ~17% CPU, 0 stalls/unplanned shutdowns/bind failures in log since restart.
+
+## Cycle 4 (13:47-14:12)
+- core bus.ts: the per-durable-event event_sequence SELECT is prepared once (sql.placeholder). core session/projector.ts: three fixed assistant-message SELECTs prepared once per db handle (WeakMap). Commit 35a8b126ba. Gain: removes per-event SQL building; small, not measured.
+- Gate: typecheck core/server clean, 459 affected tests pass, linux-x64 build smoke-tested.
+- Finding: busy_timeout=5000 with synchronous SQLite means a competing writer (e.g. --standalone run on the same DB) can block the service loop up to 5 s; reduce extra servers on the live DB, not the timeout.
+- Memory pressure on the host (35 of 40 GB used by Java/browser) paused the gate briefly.
