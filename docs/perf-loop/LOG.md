@@ -259,3 +259,7 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 33: cache-hit test now measures the previous request's retention
 - prompt-cache-prefix.test.ts compared shared-prefix bytes against the NEW request, so an appended turn (~3% of bytes) forced a 0.95 threshold. Added the goal's real criterion: the previous request (system + tools + 32 turns with tool calls) must lead the appended one for >= 99.9% of its own bytes; passes (only the closing brackets move). Test-only change, no code change.
+
+## Scout 56 (dead code / pass-through) - no change
+- The scout itself found no zero-reference declarations: only unexporting BootOptions, inlining ExecuteError / SubscriberCapacity / readAfter limit, and dropping the streamLive wrapper. No runtime effect, only diff churn in actively changing files; rejected. Correctly kept: SessionPendingTable (drizzle schema glob), latestCompaction, commitDurableEvent arg (replay uses it), mapUnavailable, SessionSystemPrompt.make.
+- Conclusion: item 6 (dead code) has no meaningful yield in session/bus/server.
