@@ -266,3 +266,8 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 34: measured gain of the shared SSE bytes (cycle 23)
 - Scoped test (deleted): one 2 KiB frame, 100 subscribers x 2000 events. Per-subscriber TextEncoder.encode: 139.6 ms total (0.7 us per encode); encode once and share: 1.5 ms. At 100 subscribers and 1000 events/s the old path costs about 70 ms of CPU per second (~7% of a core) that the shared path does not. With 1-3 subscribers (normal use) the saving is under 2 us per event: negligible. The change only matters with many concurrent SSE clients.
+
+## Cycle 35: per-step history reload composition (measured, no change)
+- Existing long-session-perf test (synthetic, in-memory DB). Cold load: 1000 msgs ~39-52 ms, 5000 ~100 ms, 20000 ~435-450 ms (~22 us/message): decode ~35-40%, parts ~22%, select ~12%, rest (row hashing, mapping) ~30%.
+- Warm load (the cost every later runner step pays through decodeCache, key = row id, hash = Bun.hash(JSON.stringify(row.data)+type)): 1000 msgs 15 ms; 5000 msgs 99.5 ms and 20000 msgs 441.7 ms, i.e. NO benefit. Cause: decodeCacheLimit = 4000 with FIFO eviction and a cyclic scan of the whole window, so a window above the cap misses every row on every step (the classic cyclic-thrash cliff).
+- Not changed: windows of >4000 messages are rare because compaction bounds the window by tokens (4000 messages is several hundred thousand tokens), the saving is ~2-5% of a seconds-long step, and a larger/per-session window cache trades memory for it. If it ever matters: key the cache per session with the current window replaced wholesale each load (bounded by recent sessions), not a global FIFO.
