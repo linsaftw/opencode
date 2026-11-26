@@ -757,7 +757,7 @@ export const layer = (options?: Options) =>
         { discard: true },
       )
 
-      const loadFromCache = Effect.fnUntraced(function* () {
+      const readCache = Effect.fnUntraced(function* () {
         const value = yield* kv.get(key)
         const cached = Schema.decodeUnknownOption(Cache)(value)
         if (Option.isSome(cached))
@@ -770,6 +770,10 @@ export const layer = (options?: Options) =>
         yield* kv.remove(key)
         yield* kv.remove(metaKey)
       })
+
+      // Boot builds up to four flag variants back to back and each one used to re-read and re-decode the whole
+      // multi-MB catalog row. Share one read among them; the short TTL keeps the parsed catalog from being retained.
+      const [loadFromCache, invalidateLoaded] = yield* Effect.cachedInvalidateWithTTL(readCache(), Duration.seconds(10))
 
       const fetchPath = (path: string, etag?: string) =>
         HttpClientRequest.get(`${source}${path}`).pipe(
@@ -819,6 +823,7 @@ export const layer = (options?: Options) =>
         const updatedAt = Date.now()
         yield* kv.set(key, { updatedAt, digest, body: text }).pipe(
           Effect.andThen(writeMeta(updatedAt, digest, etag)),
+          Effect.andThen(invalidateLoaded),
           Effect.catchCauseIf(
             (cause) => !Cause.hasInterruptsOnly(cause),
             (cause) => Effect.logWarning("Failed to cache models.dev catalog", { cause }),
@@ -837,7 +842,7 @@ export const layer = (options?: Options) =>
       const populate = Effect.fn("ModelsDev.populate")(function* (recommended: boolean, speeds: boolean) {
         const fromFile = yield* loadFromFile
         if (fromFile) return yield* normalize(fromFile, recommended, speeds)
-        const cached = options?.file ? undefined : yield* loadFromCache()
+        const cached = options?.file ? undefined : yield* loadFromCache
         if (cached) return yield* normalize(cached.catalog, recommended, speeds)
         // The bundled snapshot is the boot-time floor until the periodic fetch refreshes it.
         const bundled = options?.snapshot === false ? undefined : yield* bundledSnapshot(recommended, speeds)
@@ -845,7 +850,7 @@ export const layer = (options?: Options) =>
         if (!fetch) return []
         const catalog = yield* lock.withPermit(
           Effect.gen(function* () {
-            const stored = options?.file ? undefined : yield* loadFromCache()
+            const stored = options?.file ? undefined : yield* loadFromCache
             if (stored) return stored.catalog
             return yield* fetchAndWrite()
           }),
@@ -863,6 +868,7 @@ export const layer = (options?: Options) =>
       const priced = { day: utcDay() }
       const invalidate = Effect.gen(function* () {
         priced.day = utcDay()
+        yield* invalidateLoaded
         yield* Effect.forEach(caches, ([, invalidate]) => invalidate, { discard: true })
         yield* bus.publish(ModelsDev.Event.Refreshed, {}, { global: true })
       })
