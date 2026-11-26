@@ -275,3 +275,7 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 ## Cycle 36: scout 57 (per-step instruction/hook work)
 - Shipped: CodeModeInstructions.make memoized per inventory object (WeakMap + singleton for the removed case). Tool.snapshot already reuses one inventory until the registry changes and summarize is pure, so the per-step flatten/group/sort/format/budget pass is skipped; output identical. Codemode tests 43 pass, core typecheck clean.
 - Not taken (cache-invalidation risk exceeds the gain, needs profiling first): InstructionState baseline render cache (2), Instructions diff hashing (3), credential read overlap (4), Tool.snapshot selection reuse (5), MCP/skill/reference projection reuse (6), PluginHooks.has counters (7), default prompt memo (8).
+
+## Cycle 36 gate: installed
+- Gate: typecheck core/server/cli clean, prompt-cache-prefix + codemode tests pass, single-thread linux-x64 build, `--version` smoke only (no real `run`: would touch live data). Installed to ~/.local/bin/opencode (one backup: opencode.pre-cycle36-backup, cycle-24 backup deleted), service restarted, status reports 127.0.0.1:49374.
+- First slow-layer-release readings from the restart (nested, overlapping): LocationServiceMap/Worktree 1592 ms (role cli), MCP ~714-740 ms, Plugin ~715-741 ms. MCP release is Scope.close of attached connections whose finalizer awaits transport.close() (child-process exit); inherent, no safe cut found by reading. ~3.3 s under load still unexplained; waiting for a busy-service reading.
