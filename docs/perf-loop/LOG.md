@@ -279,3 +279,9 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 ## Cycle 36 gate: installed
 - Gate: typecheck core/server/cli clean, prompt-cache-prefix + codemode tests pass, single-thread linux-x64 build, `--version` smoke only (no real `run`: would touch live data). Installed to ~/.local/bin/opencode (one backup: opencode.pre-cycle36-backup, cycle-24 backup deleted), service restarted, status reports 127.0.0.1:49374.
 - First slow-layer-release readings from the restart (nested, overlapping): LocationServiceMap/Worktree 1592 ms (role cli), MCP ~714-740 ms, Plugin ~715-741 ms. MCP release is Scope.close of attached connections whose finalizer awaits transport.close() (child-process exit); inherent, no safe cut found by reading. ~3.3 s under load still unexplained; waiting for a busy-service reading.
+
+## Scout 58: unbounded long-lived maps (no change)
+- Worker-quoted growth rates are workload examples, not measurements; nothing was verified in code this round.
+- Largest by plausible size: bus.ts live/typed PubSubs retain events for slow subscribers (multi-type subscribers filter after subscribing to the whole live stream; a hard bound needs lossless backpressure or cursor replay); ordinary PTY outbox (pty.ts) is the same unbounded-queue class as the persistent-PTY outbox already held for a decision.
+- Small and rare (tens to hundreds of small entries per year): settled forms swept lazily, jobs for deleted owners never acknowledged, aisdk languages/sdks and bus session routes without eviction, ollama roots, WebSocket owner entries per session.
+- Not taken: every fix either changes delivery semantics or saves a negligible amount against its risk. The bus multi-type pre-filter is the only one worth a design pass if a subscriber backlog is ever observed.
