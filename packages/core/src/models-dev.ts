@@ -717,6 +717,17 @@ export const decodeSnapshot = (text: string, recommended = false, speeds = false
 // flag value per isolate and day: the snapshot is a multi-MB module-level constant and one isolate can
 // host many runtimes (Cloudflare colocates Durable Object instances), so
 // per-runtime decoding would multiply the cost.
+// The flag variants normalize one parse of the snapshot text, so only the first pays for the multi-MB JSON parse
+// and later variants reuse its decoded entries (see `memoByObject`). Held weakly so the parsed catalog is freed once
+// the variants are built instead of living for the day.
+let bundledParsed: { readonly day: string; readonly catalog: WeakRef<Record<string, unknown>> } | undefined
+const bundledCatalog = (day: string) => {
+  const alive = bundledParsed?.day === day ? bundledParsed.catalog.deref() : undefined
+  if (alive) return Effect.succeed(alive)
+  return decodeCatalog(snapshotText).pipe(
+    Effect.tap((catalog) => Effect.sync(() => (bundledParsed = { day, catalog: new WeakRef(catalog) }))),
+  )
+}
 const bundledCache = new Map<string, { readonly day: string; readonly snapshot: readonly Snapshot[] }>()
 const bundledSnapshot = (recommended: boolean, speeds: boolean) =>
   Effect.suspend(() => {
@@ -725,7 +736,8 @@ const bundledSnapshot = (recommended: boolean, speeds: boolean) =>
     const cached = bundledCache.get(key)
     return cached?.day === day
       ? Effect.succeed(cached.snapshot)
-      : decodeSnapshot(snapshotText, recommended, speeds).pipe(
+      : bundledCatalog(day).pipe(
+          Effect.flatMap((catalog) => normalize(catalog, recommended, speeds)),
           Effect.tap((snapshot) => Effect.sync(() => bundledCache.set(key, { day, snapshot }))),
         )
   })
