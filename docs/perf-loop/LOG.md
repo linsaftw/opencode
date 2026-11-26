@@ -104,3 +104,4 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 ## Cycle 18b: prompt admission skips deep clone with no prompt hook (scout 37 #1)
 - session/prompt.ts: `hooks.has("session","prompt")` gates structuredClone of prompt+metadata; with no hook the shallow copy (fresh arrays) is passed. `prepare` only reads it. Typecheck clean; session-prompt, session-owned 72 pass.
 - Scout 37 #2 (tool-definition copy per step) deferred: identity/reference risk, needs test first. Scout 38 pending.
+- Scout 38 (LLM encode/decode): negative findings (no whole-request validation, no repeated tool-def stringify). #1 ResponseFold rebuilds AssistantMessage per delta: real but medium risk (partial() used for error payloads); deferred until an equivalence test for partial/complete exists. Others unverified.
