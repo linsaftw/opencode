@@ -166,3 +166,10 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - #1 SSE per-subscriber UTF-8 encode (JSON already shared once): verified; ~1 us per 2 KiB frame, matters only with ~100 subscribers; fix changes EventFeed Stream<string> interface and test seams; REJECTED (revisit if many-client use appears).
 - #2 double authorization on ready managed requests: deliberate two gates; REJECTED.
 - #3 permission.forSession filter over pending: pending count is tiny in practice; REJECTED.
+
+## Scout 46 (DB schema/queries; sol; some cited line numbers wrong)
+- #1 session list recency index: needs migration + write cost on every time_updated bump; only matters at ~100k sessions; REJECTED for now.
+- #2 title LIKE search: leading wildcard, index cannot seek; REJECTED.
+- #3 messages() loads full session row for existence: one PK select per page; fix needs new store API and changes corrupt-metadata behaviour; REJECTED.
+- #4 fork INSERT..SELECT: changes JSON re-encode path and resource profile; REJECTED (rare op).
+- #5 stats `AS MATERIALIZED`: planner-dependent, unmeasured, rare endpoint; REJECTED.
