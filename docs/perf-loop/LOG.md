@@ -139,3 +139,8 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - Applied: goal plugin `compacted` marker cleared on session.deleted (goal.ts), one line, no behaviour change for live sessions.
 - Rejected: Claude Agent history checkpoints (hashes only, provider-specific), compaction `precomputed` on delete (small, race risk, Location sweep already bounds it), bus `sessions` route memo (one id+ref per session, miss falls back to DB).
 - Worker note: explicit `workdir` args are denied by external_directory; briefs must say "never pass workdir, use relative paths" (scouts 42/43 were blocked until then).
+
+## Scout 43 (shell/PTY; sol)
+- Applied: shell.ts readRange no longer copies Buffer chunks twice (typeof string check).
+- Deferred (behaviour/timing change, needs design): PTY WebSocket unbounded outbox (needs lossless backpressure/spill), spawned shell file-stream backpressure (could change timeouts).
+- Scout 42 (plugin/MCP) blocked by worker external_directory in 4 attempts; retry later.

@@ -795,7 +795,7 @@ const layer = () =>
                   const stream = createReadStream(file, { start, end: start + length - 1 })
                   let offset = 0
                   stream.on("data", (chunk: string | Buffer) => {
-                    const bytes = Buffer.from(chunk)
+                    const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk
                     bytes.copy(buffer, offset)
                     offset += bytes.length
                   })
