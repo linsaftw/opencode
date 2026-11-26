@@ -56,3 +56,9 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - Deferred: ModelsDev first refresh at boot (network, freshness change), migration/user_version fast path (medium risk, needs TestClock/DDL test), plugin update check fan-out on activation (network), project sweep at boot (behaviour change). Blob retention and machines read are small.
 - Note: honest expectation is a small reduction in SQLite write contention per boot, not a fix for the load; the load comes from ~225 workers owned by other sessions.
 - Cycle 10 shipped 15:53: installed build with automation startup-claim skip (b57178cc7a) and to-llm-message reasoning fix (15db071242). Before restart the cycle-9 service had run ~33 min under load avg 32-46 with no terminate/stall/unresponsive entries (previous service was killed at 12 min), supporting the 120 s unresponsive window.
+
+## Cycle 11: verified scout 32's deferred items against code
+- #4 plugin update checks REJECTED (scout wrong): supervisor.ts:228 forks the whole check fan-out with forkScoped, so it never blocks activation; PluginUpdate.check is cached per 24 h interval in a global node.
+- #2 ModelsDev boot refresh REJECTED (scout overstated): models-dev.ts:906 returns early when stored cache metadata is within ttl, so a normal boot costs one KV read; fetches only when stale, with etag.
+- #3 migration user_version fast path and #5 project sweep delay remain deferred (medium risk / behaviour change).
+- Lesson: scout claims about "blocks boot" or "per boot" costs need a code check; 3 of 5 findings in scout 32 and 2 in scout 31 were wrong or overstated.
