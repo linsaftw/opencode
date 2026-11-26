@@ -50,3 +50,8 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - Log evidence (UTC): 17:35:04 a client (`opencode models`, callerPID 1725787) logged "Background service is unresponsive" streak=7 windowMs=30171 and SIGTERMed then SIGKILLed the 12-minute-old service (pid 1566874); all other clients logged "Event stream stalled". Trigger: a burst of ~30 `run --standalone` boots (worker pool + monitor) around 17:33-17:35 starved the service for just over 30 s (shared SQLite file, 5 s busy_timeout).
 - Fix: packages/client service-timing.ts unresponsiveWindow 30 s -> 120 s (commit a30a377e6a). A hung service is still replaced, after 2 min. 60 service tests pass.
 - Also seen: contender `serve --service` processes fail with "port 49374 already in use" (harmless noise).
+
+## Cycle 10: standalone boot (scout 32)
+- Applied #1: automation.ts loop skips the startup leader claim/release (a KV write + delete on the shared SQLite file) when there are no active automations and no pending last_message_id; otherwise the existing path runs unchanged. Every `run --standalone` worker paid that write on boot. Typecheck core clean; automation tests: 70 pass, 4 fail, identical 4 failing shell tests with my change stashed (baseline, environmental).
+- Deferred: ModelsDev first refresh at boot (network, freshness change), migration/user_version fast path (medium risk, needs TestClock/DDL test), plugin update check fan-out on activation (network), project sweep at boot (behaviour change). Blob retention and machines read are small.
+- Note: honest expectation is a small reduction in SQLite write contention per boot, not a fix for the load; the load comes from ~225 workers owned by other sessions.

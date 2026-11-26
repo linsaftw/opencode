@@ -793,6 +793,13 @@ const layer = Layer.effect(
       .limit(1)
       .prepare()
 
+    const pendingRewakeQuery = db
+      .select({ id: AutomationTable.id })
+      .from(AutomationTable)
+      .innerJoin(SessionInboxTable, eq(SessionInboxTable.id, AutomationTable.last_message_id))
+      .limit(1)
+      .prepare()
+
     const hasActiveRows = (timersOnly = false) =>
       (timersOnly ? activeTimerQuery : activeQuery).get().pipe(
         Effect.orDie,
@@ -1019,6 +1026,12 @@ const layer = Layer.effect(
       const active = yield* hasActiveRows()
       if (!active && leadership !== "unchecked") {
         if (leadership === "leader") yield* releaseLeader
+        return yield* dormant
+      }
+      // Nothing active and nothing left pending: claiming, rewaking nothing and releasing would only write and delete
+      // the shared leader row (every short-lived `--stdio` server pays that on the same SQLite file) and end here anyway.
+      if (!active && (yield* pendingRewakeQuery.get().pipe(Effect.orDie)) === undefined) {
+        leadership = "follower"
         return yield* dormant
       }
       const now = yield* Clock.currentTimeMillis
