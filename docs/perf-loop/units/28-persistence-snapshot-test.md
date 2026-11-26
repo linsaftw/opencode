@@ -1,4 +1,4 @@
-STATUS: failed (worker claimed done but wrote no file; redo)
+STATUS: dropped (redundant: session-projector.test.ts already asserts rows, parts, forks, reverts, blobs)
 SUMMARY: Added packages/core/test/session-persistence-rows.test.ts with a fixed 20-event durable sequence.
 SUMMARY: Asserts five session_message rows at seq 2, 3, 17, 18, and 19 with literal decoded data, plus event_sequence seq 19.
 SUMMARY: The current schema has no session_part table; live-only delta events are asserted to remain unpersisted.
