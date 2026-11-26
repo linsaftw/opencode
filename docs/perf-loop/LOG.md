@@ -263,3 +263,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 ## Scout 56 (dead code / pass-through) - no change
 - The scout itself found no zero-reference declarations: only unexporting BootOptions, inlining ExecuteError / SubscriberCapacity / readAfter limit, and dropping the streamLive wrapper. No runtime effect, only diff churn in actively changing files; rejected. Correctly kept: SessionPendingTable (drizzle schema glob), latestCompaction, commitDurableEvent arg (replay uses it), mapUnavailable, SessionSystemPrompt.make.
 - Conclusion: item 6 (dead code) has no meaningful yield in session/bus/server.
+
+## Cycle 34: measured gain of the shared SSE bytes (cycle 23)
+- Scoped test (deleted): one 2 KiB frame, 100 subscribers x 2000 events. Per-subscriber TextEncoder.encode: 139.6 ms total (0.7 us per encode); encode once and share: 1.5 ms. At 100 subscribers and 1000 events/s the old path costs about 70 ms of CPU per second (~7% of a core) that the shared path does not. With 1-3 subscribers (normal use) the saving is under 2 us per event: negligible. The change only matters with many concurrent SSE clients.
