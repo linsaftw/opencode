@@ -176,9 +176,15 @@ export function partitionPending(rows: SessionRow[], pending: Set<string>) {
 }
 
 export function hasPart(rows: SessionRow[], ref: PartRef) {
-  return rows.some((row) => {
-    if (row.type === "part") return row.ref.messageID === ref.messageID && row.ref.partID === ref.partID
-    if (row.type !== "group") return false
-    return groupRefs(row, true).some((item) => item.messageID === ref.messageID && item.partID === ref.partID)
-  })
+  // Streaming deltas target the newest rows, so search from the end; the result is the same as a forward scan.
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]
+    if (row.type === "part") {
+      if (row.ref.messageID === ref.messageID && row.ref.partID === ref.partID) return true
+      continue
+    }
+    if (row.type !== "group") continue
+    if (groupRefs(row, true).some((item) => item.messageID === ref.messageID && item.partID === ref.partID)) return true
+  }
+  return false
 }

@@ -154,3 +154,7 @@ Typecheck clean, 3459 tests pass (prompt-cache-prefix + shell), single-thread bu
 - #3 MCP tools-changed replay: already debounced 100 ms, replay has observable effects; REJECTED.
 - #4 Plan hook `lastReminder` scan: FABRICATED (no such symbol, plan.ts is 50 lines); REJECTED.
 - #5 warming config resolve per request: in-memory scan, negligible; REJECTED.
+
+## Scout 44 (TUI/client render; sol)
+- Applied: grouping/session.ts hasPart scans rows from the end (live part is near the tail); boolean result identical. Gain unmeasured, estimated up to ~N-row visits saved per nonblank delta.
+- Deferred: reasoning group per-ref re-resolution (needs memo design), compaction findLast miss (rare), markdown reparse (unverified).
