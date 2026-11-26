@@ -67,3 +67,6 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 ## Cycle 12: migration fast path (scout 32 #3) REJECTED after reading migration.ts
 - `CREATE TABLE IF NOT EXISTS migration` on an existing table is a parse-time no-op in SQLite (no write lock taken), and the rest is one `sqlite_master` read plus one small SELECT. A `user_version` marker would add a failure mode (forgotten bump leaves a migration unapplied) to save microseconds. Not worth the risk; no change.
 - Remaining ideas are all behaviour-changing or low-yield; no code applied this cycle. Next: let the installed build gather real-use stability data.
+
+## Cycle 13: scout 29 #1 (idle WebSocket per finished session) REJECTED
+- model-transport.ts keeps the socket and `checkpoint` after `completed` on purpose: the next turn continues from the checkpoint instead of resending the whole input. Sweeping idle sockets earlier than the existing 55 min rotation would force reconnects that lose the continuation and resend full history, which costs tokens and latency (the opposite of the goal). Provider-side idle close already ends the reader and releases the channel. Cost per idle session is one socket; no change.
