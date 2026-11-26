@@ -195,3 +195,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - Observed: restarts at 21:26 and 21:47 logged "Escalating ... SIGKILL" ~5.7 s after SIGTERM although the service logged its own graceful exit (exitCode=143) at +4.3 s; teardown (3.5 s) plus process exit exceeded the client's 100 x 50 ms stop window, so clients could SIGKILL a service mid-teardown.
 - Change: client defaultEnsureTiming.stopPollAttempts 100 -> 240 (12 s = server DEADLINE 10 s + 1.5 s log flush). Client typecheck clean; service tests 60 pass.
 - Effect: a hung service now takes up to 12 s to be force-replaced instead of 5 s; graceful exits are no longer SIGKILLed.
+
+## Cycle 22 follow-up: why teardown takes ~3.5 s (investigated, no change)
+- 21:47 shutdown window: 59 "watcher stopped" + 71 "Sent HTTP response" lines evenly spread over 3.3 s, no gap > 0.65 s. Watchers of type entries/file use node fs.watch (sync close); only directory watchers use parcel. RcMap closes entries sequentially, but a temporary parcel unsubscribe timing test could not run (binding returned null for inotify in test env), so concurrent-close benefit is UNPROVEN; temp test removed. Needs a profile of teardown; not guessing.
