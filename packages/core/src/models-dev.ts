@@ -140,10 +140,23 @@ const SourceProvider = Schema.Struct({
 const TYPES: readonly string[] = ["chat", "decision", "image", "video", "realtime"]
 
 const ContextCondition = Schema.Struct({ gt: Schema.optional(Schema.Finite), gte: Schema.optional(Schema.Finite) })
-const decodeModel = Schema.decodeUnknownResult(SourceModel)
+// Boot normalizes the same catalog object once per flag variant. Decoding is a pure function of the entry, so
+// repeat variants reuse the first pass's result; a new catalog is a new object and decodes afresh.
+const memoByObject = <A>(decode: (input: unknown) => A) => {
+  const seen = new WeakMap<object, A>()
+  return (input: unknown): A => {
+    if (typeof input !== "object" || input === null) return decode(input)
+    const hit = seen.get(input)
+    if (hit !== undefined) return hit
+    const result = decode(input)
+    seen.set(input, result)
+    return result
+  }
+}
+const decodeModel = memoByObject(Schema.decodeUnknownResult(SourceModel))
 const decodeApi = Schema.decodeUnknownOption(SourceApi)
 const decodeMode = Schema.decodeUnknownOption(SourceMode)
-const decodeProvider = Schema.decodeUnknownOption(SourceProvider)
+const decodeProvider = memoByObject(Schema.decodeUnknownOption(SourceProvider))
 const decodeContext = Schema.decodeUnknownOption(ContextCondition)
 const decodeMaxTokensField = Schema.decodeUnknownOption(MaxTokensField)
 const decodeMediaInput = Schema.decodeUnknownOption(MediaInput)
