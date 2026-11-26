@@ -212,3 +212,8 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - model-transport.ts `open` now takes `exchange.connect` (plain {url, headers, rotateAfterMs}) instead of the whole exchange; the long-lived reader/error callbacks previously captured the exchange, keeping the opening request, fallback closure and driver alive while the channel idles. Behavior identical (same url/options/errors).
 - Gate: core typecheck clean; transport + checkpoint + compaction-transport + prompt-cache-prefix tests 40 pass; full core run 8040 pass / 34 fail, sampled failures identical on stashed baseline (env: GitLab, shell, config plugins).
 - Rejected from scout 52: bounding queues by dropping (behavior change), evicting transport owners (loses sticky fallback), tool-run ID-only retention and bus route-prep bypass (low gain, deferred). Checkpoint slimming (#2) deferred: needs exact-comparison care.
+
+## Scout 53 (tool execution/result handling) - all rejected
+- #1 double prompt estimate: same candidate rejected earlier (estimate already shared).
+- #2 double preview in tool-output.truncate: STALE - code already cuts once (afterLines/byteBoundary); tool/preview.ts does not exist.
+- #3 narrow permission read models, #4 history window as scalar subquery (needs query-plan check, row-validation risk), #5 skip Effect traversal for non-image normalizeImages: small, unmeasured; deferred.
