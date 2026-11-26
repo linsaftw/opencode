@@ -239,3 +239,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 29: scout 54 #3 (evicted TUI histories regrow) - FALSE
 - Cited tui/src/context/session-retention.ts does not exist; the logic is client/src/solid/retention.ts. Its effect tracks `evicted` as `${root}:${count(id)}` per excluded session and re-evicts when background turns change a session's message count ("repopulated by background turns need eviction even when their root was already evicted"), covered by tui/test/context/session-retention.test.ts. No leak; no change.
+
+## Cycle 30: PTY outbox cap implemented, then REVERTED
+- Tried a 4096-frame cap (close 1013 "client too slow" after flushing queued frames). Typecheck and persistent-pty tests passed, but no client in this repo (tui/app/client) consumes the persistent-pty socket (cursor/attachment_id/replay_complete only appear in server, protocol and process-daemon), so reconnect-with-cursor after a 1013 close is UNVERIFIED for external clients. Not shipped; reverted. Needs a user decision or the client owner's confirmation.
