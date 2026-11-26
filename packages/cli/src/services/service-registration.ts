@@ -61,7 +61,15 @@ export const register = Effect.fnUntraced(function* (options: {
       ),
     )
   yield* Effect.logInfo("service registration write", takeover)
-  yield* current.pipe(
+  let last: FileSystem.File.Info | undefined
+  const modifiedAt = (info: FileSystem.File.Info) =>
+    Option.getOrUndefined(Option.map(info.mtime, (date) => date.getTime()))
+  const unchanged = (info: FileSystem.File.Info) =>
+    last !== undefined &&
+    last.size === info.size &&
+    Option.getOrUndefined(last.ino) === Option.getOrUndefined(info.ino) &&
+    modifiedAt(last) === modifiedAt(info)
+  const verify = current.pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("managed service registration check failed; shutting down", {
         cause,
@@ -84,6 +92,19 @@ export const register = Effect.fnUntraced(function* (options: {
           }),
     ),
     Effect.filterOrFail(owns),
+  )
+  const poll = Effect.suspend(() =>
+    fs.stat(options.file).pipe(
+      // A failed stat (for example a deleted file) falls back to the read below, which reports it.
+      Effect.orElseSucceed(() => undefined),
+      Effect.flatMap((info) =>
+        info === undefined || !unchanged(info)
+          ? verify.pipe(Effect.tap(() => Effect.sync(() => (last = info))))
+          : Effect.void,
+      ),
+    ),
+  )
+  yield* poll.pipe(
     Effect.repeat(Schedule.spaced("5 seconds")),
     Effect.ignore,
     Effect.andThen(options.shutdown),
