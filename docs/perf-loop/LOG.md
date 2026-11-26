@@ -190,3 +190,8 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 ## Scout 49 (packages/ai request encoding; sol)
 - #1 Anthropic prefix rescan per system update, #3 tool-result array spreads, #4 tool-name flatten allocs, #5 sanitizeSurrogates rebuild: each sub-millisecond at 500 messages (whole request build measured 0.27 ms/750 msgs); REJECTED.
 - #2 Responses WebSocket discards a full-frame encode (opt-in transport only; ~1-3 ms at 1 MiB history): byte-equivalence work needed for full/delta frames; DEFERRED.
+
+## Cycle 22: restart reliability (from service log evidence, not a scout)
+- Observed: restarts at 21:26 and 21:47 logged "Escalating ... SIGKILL" ~5.7 s after SIGTERM although the service logged its own graceful exit (exitCode=143) at +4.3 s; teardown (3.5 s) plus process exit exceeded the client's 100 x 50 ms stop window, so clients could SIGKILL a service mid-teardown.
+- Change: client defaultEnsureTiming.stopPollAttempts 100 -> 240 (12 s = server DEADLINE 10 s + 1.5 s log flush). Client typecheck clean; service tests 60 pass.
+- Effect: a hung service now takes up to 12 s to be force-replaced instead of 5 s; graceful exits are no longer SIGKILLed.

@@ -32,7 +32,10 @@ export const defaultEnsureTiming: EnsureTiming = {
   maxSpawnDelay: 30_000,
   promiseTimeout: 300_000,
   stopPollInterval: 50,
-  stopPollAttempts: 100,
+  // A SIGTERMed service may legitimately spend up to its own 10 s shutdown deadline plus the 1.5 s log flush
+  // tearing down (MCP children, watchers, the database). Escalating to SIGKILL sooner kills a service that is
+  // still exiting cleanly; observed: restarts escalated ~5.7 s after SIGTERM while teardown was still running.
+  stopPollAttempts: 240,
   // A ready service that stops answering is only replaced after a sustained silence: under heavy load (many
   // locations booting, hundreds of watchers, MCP connects) one event-loop stall must not make every client kill
   // the service and drop all other clients' streams. Both the streak and the window must be reached.
