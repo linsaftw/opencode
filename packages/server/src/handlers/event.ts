@@ -5,7 +5,9 @@ import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../api"
 import { EventFeed } from "../event-feed"
 
-const heartbeat = Stream.tick("15 seconds").pipe(Stream.as(": heartbeat\n\n"))
+const encoder = new TextEncoder()
+const heartbeatBytes = encoder.encode(": heartbeat\n\n")
+const heartbeat = Stream.tick("15 seconds").pipe(Stream.as(heartbeatBytes))
 
 const headers = {
   "Cache-Control": "no-cache, no-transform",
@@ -25,16 +27,17 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
         } as const
         const output = Stream.unwrap(
           feed
-            .subscribe(ctx.query.types)
-            .pipe(Effect.map((live) => Stream.make(EventFeed.frame(connected)).pipe(Stream.concat(live)))),
+            .subscribeBytes(ctx.query.types)
+            .pipe(
+              Effect.map((live) =>
+                Stream.make(encoder.encode(EventFeed.frame(connected))).pipe(Stream.concat(live)),
+              ),
+            ),
         )
-        return HttpServerResponse.stream(
-          output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }), Stream.encodeText),
-          {
-            contentType: "text/event-stream",
-            headers,
-          },
-        )
+        return HttpServerResponse.stream(output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" })), {
+          contentType: "text/event-stream",
+          headers,
+        })
       }),
     )
   }),

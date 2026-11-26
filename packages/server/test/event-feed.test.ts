@@ -69,6 +69,23 @@ describe("EventFeed", () => {
     }),
   )
 
+  it.effect("encodes frame bytes once and shares them between byte subscribers", () =>
+    Effect.gen(function* () {
+      const source = makeSource()
+      const feed = yield* EventFeed.make(source.observe)
+      const left = yield* (yield* feed.subscribeBytes()).pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+      const right = yield* (yield* feed.subscribeBytes()).pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+      const payload = event("bytes")
+
+      yield* source.publish(payload)
+
+      const [first] = Array.from(yield* Fiber.join(left))
+      const [second] = Array.from(yield* Fiber.join(right))
+      expect(new TextDecoder().decode(first)).toBe(EventFeed.frame(payload))
+      expect(second).toBe(first)
+    }),
+  )
+
   it.effect("delivers only the requested event types to filtered subscribers", () =>
     Effect.gen(function* () {
       const source = makeSource()

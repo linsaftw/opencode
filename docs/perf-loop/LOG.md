@@ -198,3 +198,8 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 22 follow-up: why teardown takes ~3.5 s (investigated, no change)
 - 21:47 shutdown window: 59 "watcher stopped" + 71 "Sent HTTP response" lines evenly spread over 3.3 s, no gap > 0.65 s. Watchers of type entries/file use node fs.watch (sync close); only directory watchers use parcel. RcMap closes entries sequentially, but a temporary parcel unsubscribe timing test could not run (binding returned null for inotify in test env), so concurrent-close benefit is UNPROVEN; temp test removed. Needs a profile of teardown; not guessing.
+
+## Cycle 23: SSE bytes encoded once (goal item 3: serialize once, share bytes)
+- event-feed.ts: queue now carries a Frame {text, bytes?}; new `subscribeBytes` encodes UTF-8 lazily once per event and shares the Uint8Array across subscribers; `subscribe` (string) unchanged for existing callers/tests. handlers/event.ts uses subscribeBytes, pre-encodes the per-connection connected frame and the fixed heartbeat; no per-subscriber Stream.encodeText. Wire bytes identical (test asserts decode(bytes) === frame(payload) and shared identity).
+- Gate: server typecheck clean; event-feed + sse-failure + process tests 15 pass; full server suite 167 pass, 1 flaky fail (machine-link "closes every link..." 5 s timeout under load; passes alone with and without the change).
+- Gain: removes N-1 TextEncoder.encode calls per event for N subscribers (~1 us per 2 KiB each); matters with many clients only.
