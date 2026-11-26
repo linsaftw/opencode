@@ -36,7 +36,9 @@ export const defaultEnsureTiming: EnsureTiming = {
   // A ready service that stops answering is only replaced after a sustained silence: under heavy load (many
   // locations booting, hundreds of watchers, MCP connects) one event-loop stall must not make every client kill
   // the service and drop all other clients' streams. Both the streak and the window must be reached.
-  unresponsiveWindow: 30_000,
+  // 30 s was observed to be too short: a burst of ~30 standalone boots sharing the SQLite file starved the service for
+  // just over 30 s, a client killed it, and every other client's stream dropped. A busy service recovers by itself.
+  unresponsiveWindow: 120_000,
   unresponsiveFailures: 4,
   // A service still reporting `starting` may hold its event loop for minutes while loading. Only
   // escalate after this much longer streak, and let promiseTimeout bound the overall wait.
