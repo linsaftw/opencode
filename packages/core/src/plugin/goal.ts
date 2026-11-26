@@ -294,8 +294,10 @@ export const Plugin = define({
       .pipe(
         Stream.runForEach((event) => {
           const sessionID = event.data.sessionID
-          if (event.type === "session.deleted")
+          if (event.type === "session.deleted") {
+            compacted.delete(sessionID)
             return FiberMap.remove(timers, sessionID).pipe(Effect.andThen(ctx.storage.remove(PREFIX + sessionID)))
+          }
           if (event.type === "session.step.started" || event.type === "session.step.ended")
             return touch(sessionID).pipe(
               Effect.catchCause((cause) => Effect.logWarning("failed to note goal activity", { sessionID, cause })),

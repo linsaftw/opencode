@@ -134,3 +134,8 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - #2 `Context.make`/`Context.add` per selection for Code Mode: constant, small; REJECTED.
 - #3 `rulesets.flat()` per selection: linear in a handful of rules; REJECTED (nonempty cache unsafe: permissions can change).
 - No finding clears the bar (identical behaviour AND measurable). Worker model note: `openai/gpt-6.2-sol` works for scouting; commandcode out of credits, free tier exhausted.
+
+## Scout 41 (memory retention; sol)
+- Applied: goal plugin `compacted` marker cleared on session.deleted (goal.ts), one line, no behaviour change for live sessions.
+- Rejected: Claude Agent history checkpoints (hashes only, provider-specific), compaction `precomputed` on delete (small, race risk, Location sweep already bounds it), bus `sessions` route memo (one id+ref per session, miss falls back to DB).
+- Worker note: explicit `workdir` args are denied by external_directory; briefs must say "never pass workdir, use relative paths" (scouts 42/43 were blocked until then).
