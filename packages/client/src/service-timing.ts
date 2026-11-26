@@ -26,16 +26,18 @@ const timings = new WeakMap<object, EnsureTiming>()
 // window that reaches or exceeds it could never elapse and escalation would be unreachable.
 export const defaultEnsureTiming: EnsureTiming = {
   pollInterval: 25,
-  requestTimeout: 2_000,
+  // Probes share the service's single event loop, so a loaded service answers slowly long before it is hung.
+  requestTimeout: 5_000,
   spawnDelay: 5_000,
   maxSpawnDelay: 30_000,
   promiseTimeout: 300_000,
   stopPollInterval: 50,
   stopPollAttempts: 100,
-  // A service that was ready and stops answering is hung: three two-second probes replace it in
-  // roughly six seconds, as before the slow-boot tolerance was added.
-  unresponsiveWindow: 0,
-  unresponsiveFailures: 3,
+  // A ready service that stops answering is only replaced after a sustained silence: under heavy load (many
+  // locations booting, hundreds of watchers, MCP connects) one event-loop stall must not make every client kill
+  // the service and drop all other clients' streams. Both the streak and the window must be reached.
+  unresponsiveWindow: 30_000,
+  unresponsiveFailures: 4,
   // A service still reporting `starting` may hold its event loop for minutes while loading. Only
   // escalate after this much longer streak, and let promiseTimeout bound the overall wait.
   startingWindow: 240_000,
