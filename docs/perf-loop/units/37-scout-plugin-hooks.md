@@ -1,4 +1,4 @@
-STATUS: scouted (applied cycle 18: #1 prompt clone gate; #2 deferred)
+STATUS: scouted (applied cycle 18: #1 prompt clone gate; #2 rejected: built-in plugins always register context hooks; #3 negligible)
 # Unit 37 (scout, read-only on source): plugin hook dispatch cost on hot paths
 Read packages/core/src/plugin/hooks.ts and every call site of hooks.trigger / ctx.tool.hook / ctx.session hooks on the per-message, per-step, per-tool-call and per-event paths (session/prompt.ts, runner/step.ts, runner/llm.ts, tool.ts execute.before/after, model-request.ts hooks). Find per-trigger work that does not depend on whether any plugin registered: allocating event copies, structuredClone of payloads, building Effect chains for empty callback lists, sorting or filtering callbacks on every trigger, schema decode of hook results. For each: file:line, quoted code, cost per trigger, minimal fix with identical behaviour (including with zero and many callbacks), risk. Verify every claim by quoting code; say "unverified" when unsure. Top 5 under "## Findings". Edit no other file; re-read this file at the end.
 
