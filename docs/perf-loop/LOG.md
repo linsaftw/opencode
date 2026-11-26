@@ -86,3 +86,10 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 
 ## Cycle 16: scout 34 #4 (unsupportedParts/boundImages walks) REJECTED
 - model-request.ts:206-226 and :263-274 walk the messages with pointer comparisons and return the same objects when nothing is replaced; boundImages reads per-message sizes from a WeakMap. That is O(messages) of cheap identity work per step (microseconds at thousands of messages), dwarfed by what cycles 14-15 removed (blob reads, base64, JSON.stringify of media). Memoizing it would add a per-capability cache key for no measurable gain. #5 estimatePrompt and #2 part reload still need invalidation design.
+
+## Cycle 17: tool-path costs (scout 36)
+- util/wildcard.ts: compiled-RegExp memo (1024 entries, FIFO eviction, flags in the key). Permission checks recompiled every rule glob per tool per step (hundreds of RegExp builds per step with ~30 tools).
+- ripgrep.ts: `decodeMatch` built once instead of per matching line.
+- tool/plugin/edit.ts: `normalizeForMatch` regexes hoisted to constants and the expected lines normalized once; `replaceAll` builds the result in one ascending chunk pass instead of one whole-file copy per match (matches are ascending, non-overlapping, and `replace` reads only `source`).
+- Deferred: tool-input-repair schema conversion per call (#1, WeakMap on tool identity; needs a test that a replaced tool object misses the cache), tool-output text concat, fileDiff double diff (byte-identity of counts unverified).
+- Verified: core typecheck clean; permission, ripgrep, tool-edit/execute/patch/output/model-policy, prompt-cache-prefix 294 pass; policy, tool-registry, config, search, bus, session-store 339 pass.

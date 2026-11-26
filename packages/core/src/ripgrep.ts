@@ -41,6 +41,7 @@ const RawMatch = Schema.Struct({
   }),
 })
 const decodeJsonRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))
+const decodeMatch = Schema.decodeUnknownEffect(RawMatch)
 
 const rawText = (data: typeof RawData.Type) =>
   "text" in data ? data.text : Buffer.from(data.bytes, "base64").toString("utf8")
@@ -256,7 +257,7 @@ const layer = Layer.effect(
               Effect.flatMap((json) => {
                 if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match")
                   return Effect.undefined
-                return Schema.decodeUnknownEffect(RawMatch)(json).pipe(
+                return decodeMatch(json).pipe(
                   Effect.map((match) => {
                     const lines = rawText(match.data.lines)
                     return {

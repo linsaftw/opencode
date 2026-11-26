@@ -42,12 +42,13 @@ interface Match {
   readonly end: number
 }
 
+const singleQuotes = /[‘’‚‛]/g
+const doubleQuotes = /[“”„‟]/g
+const dashes = /[‐‑‒–—―−]/g
+const spaces = /[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g
+
 const normalizeForMatch = (value: string) =>
-  value
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[“”„‟]/g, '"')
-    .replace(/[‐‑‒–—―−]/g, "-")
-    .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
+  value.replace(singleQuotes, "'").replace(doubleQuotes, '"').replace(dashes, "-").replace(spaces, " ")
 
 const findOccurrences = (content: string, search: string) => {
   const result: Match[] = []
@@ -76,15 +77,11 @@ const findLineOccurrences = (content: string, search: string) => {
         newline,
       }
     })
+  const normalizedExpected = expected.map((line) => normalizeForMatch(line.trimEnd()))
   const candidates = lines.flatMap((line, index) => {
     const actual = lines.slice(index, index + expected.length)
     if (actual.length !== expected.length) return []
-    if (
-      !actual.every(
-        (item, lineIndex) =>
-          normalizeForMatch(item.text.trimEnd()) === normalizeForMatch(expected[lineIndex].trimEnd()),
-      )
-    )
+    if (!actual.every((item, lineIndex) => normalizeForMatch(item.text.trimEnd()) === normalizedExpected[lineIndex]))
       return []
     const last = actual.at(-1)!
     if (trailingNewline && !last.newline) return []
@@ -319,12 +316,15 @@ export const Plugin = {
                 ? { matches: findOccurrences(source, input.oldString), replace: () => input.newString }
                 : matchView(source, input.oldString, input.newString)
               const replacements = matches.length
-              const replaced = (input.replaceAll === true ? matches : matches.slice(0, 1))
-                .toReversed()
-                .reduce(
-                  (content, match) => `${content.slice(0, match.start)}${replace(match)}${content.slice(match.end)}`,
-                  source,
-                )
+              // Matches are ascending and never overlap, and `replace` reads only `source`, so one pass of chunks
+              // builds the same text without copying the whole file once per match.
+              const chunks: string[] = []
+              const end = (input.replaceAll === true ? matches : matches.slice(0, 1)).reduce((cursor, match) => {
+                chunks.push(source.slice(cursor, match.start), replace(match))
+                return match.end
+              }, 0)
+              chunks.push(source.slice(end))
+              const replaced = chunks.join("")
               const preview =
                 replacements > 0 && (replacements === 1 || input.replaceAll === true)
                   ? fileDiff(target.resource, source, replaced)
