@@ -224,3 +224,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 26: continuation checkpoint slimming - rejected
 - open-responses-continuation.ts: the checkpoint value ({version, responseID, request, output}) is the persisted/transported checkpoint contract; `incremental` needs the full previous input for an exact element-wise canonical comparison. Storing a derived canonical form changes the checkpoint format (VERSION bump, stored-checkpoint compatibility) and the exact-compare semantics for a bounded, once-per-session retention. Risk > gain; not applied. Would need a user decision on checkpoint format migration.
+
+## Cycle 27: session-list index - nothing to migrate
+- session sql.ts already has session_v2_root_updated_idx, session_v2_root_project_path_updated_idx, project/workspace/parent/suspended indexes, plus message (session,type,seq), (session,time_created,id) and inbox (session,delivery,seq) covering indexes. The "session-list index migration" deferred item is not needed; removed from the open list. A real gap would need EXPLAIN QUERY PLAN on a synthetic DB (scoped test), not guessing.
