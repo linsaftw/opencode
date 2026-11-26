@@ -178,7 +178,8 @@ export function createClientConnection(initialApi: OpenCodeClient, options: Clie
         forced = false
         continue
       }
-      await wait(reconnectDelay, controller.signal)
+      // Back off exponentially with jitter so clients that lost the same overloaded service do not re-dial in lockstep.
+      await wait(Math.min(30_000, reconnectDelay * 2 ** Math.min(attempt - 1, 5)) + Math.random() * 500, controller.signal)
     }
   }
 
