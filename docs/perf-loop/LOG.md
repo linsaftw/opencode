@@ -10,3 +10,10 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - server handlers/event.ts: hoisted invariant heartbeat/headers out of per-subscriber setup. Small.
 - client service-timing/connection: probe timeout 2s->5s, unresponsive kill needs 4 failures over 30s, SSE stall 45s->90s. Targets the service-SIGTERM/"Event stream stalled" churn seen in logs at 13:42Z.
 - REVERTED: message-updater.ts rewrite (65 type errors), inbox.ts prepared statements (transaction-handle/typing risk). Units 14 history, 15 llm-runner: workers died ("Failed to execute statement"), not done; carry to cycle 2.
+
+## Cycle 2 (12:11-12:41)
+- core config/plugin skill.ts + compatibility.ts: refresh no longer clears and recreates every native watcher; only vanished keys are pruned, and each subscription is scoped to its watch fiber (no unused subscriptions per refresh). Targets the ~820 watcher-subscribe / 627 watcher-started churn per few minutes seen in logs. Gain unmeasured.
+- instruction.ts: scoped subscribe-in-fiber kept; directory-grouped entries watch REVERTED (tests pin one file-watch per file).
+- REJECTED: unit 14 history cache (2x memory, deepEquals not cheaper), unit 15 llm runner (cwd cached across retries, dropped ...prepared spread).
+- Scout: docs/perf-loop/units/19-scout-watchers.md. Open: global skill-root scan memoization (needs invalidation design).
+- Build rule: always `--single` (linux-x64) with OPENCODE_VERSION=2.4.1 OPENCODE_CHANNEL=latest.
