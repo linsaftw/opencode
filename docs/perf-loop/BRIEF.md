@@ -1,0 +1,1 @@
+Unit: {{UNIT_PATH}}. Read it and AGENTS.md. Edit ONLY files the unit names. No git, no builds. Keep behavior identical. When done, replace the line "STATUS: open" in the unit with "STATUS: done" plus a 3-line summary of the change.
