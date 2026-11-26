@@ -177,3 +177,8 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 ## Scout 48 (CLI/TUI cold start; sol; all ms estimates unverified)
 - #1 TUI app.tsx lists cwd via file.list only to read response.location (verified in code): swapping to location.get changes the unlistable-directory fallback semantics and older-server behaviour; needs a live TUI start check; DEFERRED to a gate with runtime verification (1-50 ms).
 - #2 serial skill tree scans, #3 Storybook eager import (~0-5 ms), #4 git project resolve serial (1-8 ms cold worktree), #5 service config read twice (<3 ms): below the bar or need equivalence checks; REJECTED.
+
+## Scout 47 (provider stream decoding, packages/ai; sol)
+- Applied: openai-chat.ts tool index lookup now lazy (`tool.index ?? toolIndexByID(...) ?? ...`); pure function, identical results; full ai suite 2304 pass. Gain tiny (id-bearing first delta only).
+- #1 LLM.generate event-history copy: FALSE for this checkout (appendEvent already `state.events.push`); REJECTED.
+- #2 WebSocket double decode, #3 Bedrock framing recopy, #4 partial-JSON reparse (core publisher does not trigger it): provider/path-specific, need event-equivalence work; DEFERRED.

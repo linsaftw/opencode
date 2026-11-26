@@ -1213,11 +1213,12 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
     // Compatible providers may omit indexes. Prefer durable identity, then use
     // batch position for parallel deltas or the latest call for sparse chunks.
     for (const [position, tool] of toolDeltas.entries()) {
-      const matched = toolIndexByID(tools, pendingTools, tool.id || undefined)
       const fallback = toolDeltas.length > 1 ? position : (latestToolIndex ?? position)
       const fallbackTool = tools[fallback] ?? pendingTools[fallback]
       const index =
-        tool.index ?? matched ?? (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)
+        tool.index ??
+        toolIndexByID(tools, pendingTools, tool.id || undefined) ??
+        (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)
       const current = tools[index]
       const pending = pendingTools[index]
       const id = current?.id ?? pending?.id ?? (tool.id || undefined)
