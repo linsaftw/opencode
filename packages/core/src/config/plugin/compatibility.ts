@@ -17,6 +17,7 @@ export const Plugin = define({
     const fs = yield* FSUtil.Service
     const watcher = yield* Watcher.Service
     const watches = yield* FiberMap.make<string>()
+    const active = new Set<string>()
     const changes = yield* PubSub.sliding<string>(1)
     const lock = Semaphore.makeUnsafe(1)
     const skills: Skill.Info[] = []
@@ -27,20 +28,31 @@ export const Plugin = define({
       target: string,
       type: "file" | "directory",
     ) {
-      const updates = yield* watcher.subscribe(
-        type === "directory" ? { path: target, type, ignore: SkillScan.ignore } : { path: target, type },
-      )
+      const key = `${type}:${target}`
+      active.add(key)
+      // Subscribe inside the watch fiber's own scope: a refresh that finds the key already running starts no
+      // second subscription, and removing the key releases its subscription.
       yield* FiberMap.run(
         watches,
-        `${type}:${target}`,
-        updates.pipe(Stream.runForEach((update) => PubSub.publish(changes, update.path).pipe(Effect.asVoid))),
+        key,
+        Effect.scoped(
+          watcher
+            .subscribe(
+              type === "directory" ? { path: target, type, ignore: SkillScan.ignore } : { path: target, type },
+            )
+            .pipe(
+              Effect.flatMap((updates) =>
+                updates.pipe(Stream.runForEach((update) => PubSub.publish(changes, update.path).pipe(Effect.asVoid))),
+              ),
+            ),
+        ),
         { onlyIfMissing: true, startImmediately: true },
       )
     })
 
     const refresh = Effect.fn("ConfigCompatibilityPlugin.refresh")(
       function* () {
-        yield* FiberMap.clear(watches)
+        active.clear()
         const roots = yield* compatibility()
         const directories = [...roots.claude, ...roots.agents].map((root) => path.join(root, "skills"))
         const loaded = new Map<Skill.ID, Skill.Info>()
@@ -54,6 +66,9 @@ export const Plugin = define({
             const parsed = SkillFile.parse(resolved, filepath, content)
             if (parsed._tag === "Parsed") loaded.set(parsed.skill.id, parsed.skill)
           }
+        }
+        for (const key of Array.from(watches, ([key]) => key)) {
+          if (!active.has(key)) yield* FiberMap.remove(watches, key)
         }
         skills.splice(0, skills.length, ...loaded.values())
       },

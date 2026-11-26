@@ -142,11 +142,17 @@ export const Plugin = define({
         }
         for (const [key] of Array.from(watches)) if (!watched.has(key)) yield* FiberMap.remove(watches, key)
         for (const file of watched) {
-          const updates = yield* watcher.subscribe({ path: file, type: "file" })
-          yield* FiberMap.run(watches, file, updates.pipe(Stream.runForEach(publish)), {
-            onlyIfMissing: true,
-            startImmediately: true,
-          })
+          yield* FiberMap.run(
+            watches,
+            file,
+            Effect.scoped(
+              Effect.gen(function* () {
+                const updates = yield* watcher.subscribe({ path: file, type: "file" })
+                return yield* updates.pipe(Stream.runForEach(publish))
+              }),
+            ),
+            { onlyIfMissing: true, startImmediately: true },
+          )
         }
         return files
       })

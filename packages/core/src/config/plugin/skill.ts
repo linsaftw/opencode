@@ -31,18 +31,30 @@ export const Plugin = define({
       skills: [],
     }
     const watches = yield* FiberMap.make<string>()
+    const active = new Set<string>()
     const changes = yield* PubSub.sliding<string>(1)
     const lock = Semaphore.makeUnsafe(1)
 
     const watch = Effect.fn("ConfigSkillPlugin.watch")(function* (directory: string, type: "file" | "directory") {
       const target = path.resolve(directory)
-      const updates = yield* watcher.subscribe(
-        type === "directory" ? { path: target, type, ignore: SkillScan.ignore } : { path: target, type },
-      )
+      const key = `${type}:${target}`
+      active.add(key)
+      // Subscribe inside the watch fiber's own scope: a refresh that finds the key already running starts no
+      // second subscription, and removing the key releases its subscription.
       yield* FiberMap.run(
         watches,
-        `${type}:${target}`,
-        updates.pipe(Stream.runForEach((update) => PubSub.publish(changes, update.path).pipe(Effect.asVoid))),
+        key,
+        Effect.scoped(
+          watcher
+            .subscribe(
+              type === "directory" ? { path: target, type, ignore: SkillScan.ignore } : { path: target, type },
+            )
+            .pipe(
+              Effect.flatMap((updates) =>
+                updates.pipe(Stream.runForEach((update) => PubSub.publish(changes, update.path).pipe(Effect.asVoid))),
+              ),
+            ),
+        ),
         { onlyIfMissing: true, startImmediately: true },
       )
     })
@@ -71,7 +83,11 @@ export const Plugin = define({
           Effect.orElseSucceed(() => false),
         )
       ) {
-        if (missing) yield* FiberMap.remove(watches, `file:${path.resolve(missing)}`)
+        if (missing) {
+          const key = `file:${path.resolve(missing)}`
+          active.delete(key)
+          yield* FiberMap.remove(watches, key)
+        }
         return yield* watchDirectory(directory)
       }
       return [target]
@@ -148,11 +164,14 @@ export const Plugin = define({
 
     const refresh = Effect.fn("ConfigSkillPlugin.refresh")(
       function* (file?: string) {
-        yield* FiberMap.clear(watches)
+        active.clear()
         const skills = new Map<Skill.ID, Skill.Info>()
         const current = sources()
         for (const source of current) {
           for (const skill of yield* load(source)) skills.set(skill.id, skill)
+        }
+        for (const key of Array.from(watches, ([key]) => key)) {
+          if (!active.has(key)) yield* FiberMap.remove(watches, key)
         }
         loaded.skills = Array.from(skills.values())
         if (file) {

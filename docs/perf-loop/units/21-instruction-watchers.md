@@ -1,0 +1,7 @@
+STATUS: done
+Summary: Group ancestor AGENTS.md/CLAUDE.md candidates by directory and subscribe once per directory with an `entries` watch on their names, instead of one `file` watch per file.
+Why faster: A directory of N candidate files now uses one native `fs.watch` handle instead of N, since `nativeLayer` starts one watch per `file` target's parent but shares an `entries` target.
+Risk: Low; `entries` watches report the same `{path, type:"update"}` events for the listed names. Also moved the configured-instruction `watcher.subscribe` inside `FiberMap.run(..., {onlyIfMissing:true})` so repeated refreshes skip re-subscribing existing keys.
+# Unit 21: one entries watch per directory for instruction files
+File (only this): packages/core/src/config/plugin/instruction.ts
+Read docs/perf-loop/units/19-scout-watchers.md section 3 fix 2. Lines ~63-66 create one file watch per ancestor AGENTS.md/CLAUDE.md. Group candidate files by path.dirname and subscribe once per directory with {type:"entries", names:[...]} (check packages/core/src/filesystem/watcher.ts for the exact subscribe shape and that an entries watch reports the same change events for those names). Also avoid calling watcher.subscribe before FiberMap.run(..., {onlyIfMissing:true}) (~lines 144-149) so repeated refreshes do not subscribe again. Behavior must be identical: a change to any watched file still triggers the same refresh.

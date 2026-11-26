@@ -1,0 +1,7 @@
+STATUS: done
+Area: cache hit test
+Files: packages/core/test/prompt-cache-prefix.test.ts (new file only)
+Task: Write a deterministic test with no network/provider: build requests for a sample conversation (system prompt, tools, 30+ turns incl. tool calls) through the real request-building code from model-request.ts (read its exports and existing tests for how to construct inputs). Simulate a prefix cache: for request N+1 (new turn appended, and an identical repeat) compute the longest common prefix of the serialized request vs request N; assert common/total (tokens ~ bytes/4) >= 0.999 for the repeat and a high ratio for appended turns. Do NOT run it. Do not edit src files.
+Changed: added packages/core/test/prompt-cache-prefix.test.ts, which builds a 32-turn conversation (system prompt, two tool schemas, tool calls and results) through SessionModelRequest.primary and measures the longest common byte prefix of the serialized system/tools/messages payload.
+Faster: it proves the cached prefix stays byte-identical when a request repeats and almost fully shared when a turn is appended, so prompt-cache regressions (rebuilt messages, reordered tools, changed system text) fail in-process without a provider.
+Risk: the appended-turn ratio is asserted at >= 0.95, a loose floor; a real regression that only shifts a few early bytes would still pass the ratio check, and the test is unverified because it was not run.
