@@ -330,17 +330,27 @@ export function compile<A, E>(root: Graph<A, E>, options: CompileOptions = {}): 
 // The node's scope releases sequentially in reverse order, so a finalizer added before the build runs last and one
 // added after it runs first: together they bracket the release of everything this node acquired. The build must
 // not start before the first finalizer is added; Layer builds fork their scopes as soon as they are called.
+const SLOW_RELEASE_MS = 250
+
 function trackRelease<A, E, R>(name: string, scope: Scope.Scope, build: () => Effect.Effect<A, E, R>) {
   return Effect.gen(function* () {
     let settle = () => {}
+    let releaseStarted = 0
     yield* Scope.addFinalizer(
       scope,
-      Effect.sync(() => settle()),
+      Effect.suspend(() => {
+        settle()
+        // Teardown.pending() only names work still stuck at the deadline; a layer that is merely slow to
+        // release would otherwise leave no trace of what paced the shutdown.
+        const ms = releaseStarted === 0 ? 0 : Date.now() - releaseStarted
+        return ms >= SLOW_RELEASE_MS ? Effect.logWarning("slow layer release", { layer: name, ms }) : Effect.void
+      }),
     )
     const result = yield* build()
     yield* Scope.addFinalizer(
       scope,
       Effect.sync(() => {
+        releaseStarted = Date.now()
         settle = Teardown.track(`layer ${name} releasing`)
       }),
     )
