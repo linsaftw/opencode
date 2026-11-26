@@ -100,3 +100,7 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - tool/runtime.ts `repairInputSchema`: WeakMap keyed by the input schema object (not the tool), used only by the read-only repair hook, replacing a per-call `definition().inputSchema` that rebuilt the full JSON Schema (toJsonSchemaDocument + flatten + inline + drop defs) for every tool call. A replaced tool with a new schema converts again; `definition()` itself is unchanged for other consumers.
 - Test test/tool-repair-schema-cache.test.ts (same schema reused, different schema converts, results equal). It caught a first version that never cached: Effect schemas are functions (`typeof` "function"), not objects.
 - Verified: core typecheck clean; repair, repair-integration, tool-execute, tool-registry, cache test 120 pass.
+
+## Cycle 18b: prompt admission skips deep clone with no prompt hook (scout 37 #1)
+- session/prompt.ts: `hooks.has("session","prompt")` gates structuredClone of prompt+metadata; with no hook the shallow copy (fresh arrays) is passed. `prepare` only reads it. Typecheck clean; session-prompt, session-owned 72 pass.
+- Scout 37 #2 (tool-definition copy per step) deferred: identity/reference risk, needs test first. Scout 38 pending.

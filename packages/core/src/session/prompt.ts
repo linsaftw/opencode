@@ -39,16 +39,20 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
   const fs = yield* FSUtil.Service
   yield* Plugin.awaitActivation
   const hooks = yield* PluginHooks.Service
+  // Hooks may edit the event, so they get private copies. With no prompt hook registered nothing can observe or mutate
+  // the event, and a deep copy would only duplicate every attachment's bytes; `prepare` below only reads the input.
+  const observed = yield* hooks.has("session", "prompt")
+  const shallow = {
+    text: request.input.text,
+    files: request.input.files?.slice(),
+    agents: request.input.agents?.slice(),
+    skills: request.input.skills?.slice(),
+  }
   const event = yield* hooks.trigger("session", "prompt", {
     sessionID: request.session.id,
     messageID: request.messageID,
-    prompt: structuredClone({
-      text: request.input.text,
-      files: request.input.files?.slice(),
-      agents: request.input.agents?.slice(),
-      skills: request.input.skills?.slice(),
-    }),
-    metadata: structuredClone(request.input.metadata),
+    prompt: observed ? structuredClone(shallow) : shallow,
+    metadata: observed ? structuredClone(request.input.metadata) : request.input.metadata,
     delivery: request.input.delivery ?? "steer",
   })
   const input = event.prompt
