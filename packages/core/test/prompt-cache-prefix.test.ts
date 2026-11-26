@@ -133,6 +133,10 @@ describe("SessionModelRequest prompt cache prefix", () => {
       // A new turn only appends to the end; the system prompt, tool schemas and earlier messages stay identical.
       expect(prefixRatio(previous, appended)).toBeGreaterThanOrEqual(0.95)
       expect(appended.length).toBeGreaterThan(previous.length)
+      // What a provider cache reuses is the previous request: all of it must lead the next one, up to the closing
+      // brackets that the appended message moves.
+      const retained = Buffer.byteLength(previous.slice(0, commonPrefix(previous, appended)))
+      expect(retained / Buffer.byteLength(previous)).toBeGreaterThanOrEqual(0.999)
     }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
   )
 })

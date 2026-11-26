@@ -256,3 +256,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 32 install (cycle-24 build)
 - Installed (backup opencode.pre-cycle24-backup; cycle-23 backup deleted), restarted twice, smoke `run` returned "ok". Second restart (12 s uptime, near-empty service) logged: MCP 394 ms, Plugin 395 ms (nested in LocationServiceMap/Worktree 777 ms), process exit after ~0.8 s, SIGTERM exit 143, no SIGKILL. A long-lived busy service's restart will show the 3 s+ culprit: `rg "slow layer release" ~/.local/share/opencode/log/opencode.log`.
+
+## Cycle 33: cache-hit test now measures the previous request's retention
+- prompt-cache-prefix.test.ts compared shared-prefix bytes against the NEW request, so an appended turn (~3% of bytes) forced a 0.95 threshold. Added the goal's real criterion: the previous request (system + tools + 32 turns with tool calls) must lead the appended one for >= 99.9% of its own bytes; passes (only the closing brackets move). Test-only change, no code change.
