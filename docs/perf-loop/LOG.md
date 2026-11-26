@@ -29,3 +29,9 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - Gate: typecheck core/server clean, 459 affected tests pass, linux-x64 build smoke-tested.
 - Finding: busy_timeout=5000 with synchronous SQLite means a competing writer (e.g. --standalone run on the same DB) can block the service loop up to 5 s; reduce extra servers on the live DB, not the timeout.
 - Memory pressure on the host (35 of 40 GB used by Java/browser) paused the gate briefly.
+
+## Cycle 5 (14:23-, in progress)
+- Scout 27 (runner step). Applied: to-llm-message.ts finds the last output item once instead of slice+some per reasoning item (commit 15db071242; only affects cut/errored messages, tiny gain). Typecheck core clean, 340 runner/request tests pass.
+- Rejected: publish-llm-event double buffering (values is needed for the final join, pending is the reset batch); record() tool scan (short-circuits, handful of tools per step); prompt.ts structuredClone (per prompt, isolates plugin hooks).
+- Held (medium risk, need design): duplicate transcript/estimate per step (llm.ts:258/267), per-step snapshot capture skip (step.ts:80, :291).
+- Honest note: the remaining per-event hot-path wins are now small; the larger costs are per-step (snapshots, transcript rebuild). Not shipped yet; waiting for a bigger batch.
