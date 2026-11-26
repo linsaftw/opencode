@@ -135,7 +135,7 @@ const MIN_PROMPT_INTERVAL = MINUTE
 const MIN_CODE_INTERVAL = 15_000
 /** A run this far past its due time is marked late. */
 const LATE_AFTER = MINUTE
-/** The loop re-reads the table at least this often, so clock jumps and missed doorbells are caught. */
+/** While automations exist, the loop re-reads the table this often, so clock jumps and missed doorbells are caught. */
 const MAX_SLEEP = 30_000
 const LEADER_KEY = "automation:leader"
 const LEADER_TTL = 2 * MAX_SLEEP
@@ -346,16 +346,17 @@ const layer = Layer.effect(
         return row
       })
 
+    const findQuery = db
+      .select()
+      .from(AutomationTable)
+      .where(eq(AutomationTable.id, sql.placeholder("id")))
+      .prepare()
+
     const find = (id: ID) =>
-      db
-        .select()
-        .from(AutomationTable)
-        .where(eq(AutomationTable.id, id))
-        .get()
-        .pipe(
-          Effect.orDie,
-          Effect.flatMap((row) => (row ? Effect.succeed(row) : Effect.fail(new NotFoundError({ automationID: id })))),
-        )
+      findQuery.get({ id }).pipe(
+        Effect.orDie,
+        Effect.flatMap((row) => (row ? Effect.succeed(row) : Effect.fail(new NotFoundError({ automationID: id })))),
+      )
 
     /**
      * Writes what came of running `row`, but only while its run_count is the one that was read: if another process
@@ -384,16 +385,17 @@ const layer = Layer.effect(
         { evenIfPaused: true },
       )
 
+    const pendingQuery = db
+      .select({ id: SessionInboxTable.id })
+      .from(SessionInboxTable)
+      .where(eq(SessionInboxTable.id, sql.placeholder("id")))
+      .prepare()
+
     const pending = (id: SessionMessage.ID) =>
-      db
-        .select({ id: SessionInboxTable.id })
-        .from(SessionInboxTable)
-        .where(eq(SessionInboxTable.id, id))
-        .get()
-        .pipe(
-          Effect.orDie,
-          Effect.map((row) => row !== undefined),
-        )
+      pendingQuery.get({ id }).pipe(
+        Effect.orDie,
+        Effect.map((row) => row !== undefined),
+      )
 
     const existing = (sessionID: SessionSchema.ID) =>
       sessions.get(sessionID).pipe(Effect.catchTag("Session.NotFoundError", () => Effect.undefined))
@@ -696,29 +698,32 @@ const layer = Layer.effect(
       return yield* runAction(row, now)
     })
 
+    // Selection and admission share one shape, so both statements keep the same prepared param layout for `from`.
+    const eligibleFrom = sql.placeholder("from")
+    const eligible = and(
+      eq(AutomationTable.status, "active"),
+      lte(AutomationTable.next_due_at, eligibleFrom),
+      or(isNull(AutomationTable.retry_at), lte(AutomationTable.retry_at, eligibleFrom)),
+    )
+    const dueQuery = db
+      .select({ id: AutomationTable.id })
+      .from(AutomationTable)
+      .where(eligible)
+      .orderBy(asc(AutomationTable.next_due_at))
+      .prepare()
+    const dueRowQuery = db
+      .select()
+      .from(AutomationTable)
+      .where(and(eq(AutomationTable.id, sql.placeholder("id")), eligible))
+      .prepare()
+
     const tickAt = Effect.fnUntraced(function* (from: number) {
-      const eligible = and(
-        eq(AutomationTable.status, "active"),
-        lte(AutomationTable.next_due_at, from),
-        or(isNull(AutomationTable.retry_at), lte(AutomationTable.retry_at, from)),
-      )
-      const due = yield* db
-        .select({ id: AutomationTable.id })
-        .from(AutomationTable)
-        .where(eligible)
-        .orderBy(asc(AutomationTable.next_due_at))
-        .all()
-        .pipe(Effect.orDie)
+      const due = yield* dueQuery.all({ from }).pipe(Effect.orDie)
       yield* Effect.forEach(
         due,
         Effect.fnUntraced(function* ({ id }) {
           // Selection isn't admission: a timer queued behind slow actions can be paused, removed or rescheduled.
-          const row = yield* db
-            .select()
-            .from(AutomationTable)
-            .where(and(eq(AutomationTable.id, id), eligible))
-            .get()
-            .pipe(Effect.orDie)
+          const row = yield* dueRowQuery.get({ id, from }).pipe(Effect.orDie)
           if (!row) return
           const now = yield* Clock.currentTimeMillis
           yield* runDue(row, now).pipe(
@@ -750,59 +755,78 @@ const layer = Layer.effect(
 
     // Rows due by `from` that could not run (a failed prompt, a retry_at not yet reached) are rechecked after at most
     // MAX_SLEEP, not in a spin.
+    const nextWakeQuery = db
+      .select({ at: min(AutomationTable.next_due_at) })
+      .from(AutomationTable)
+      .where(and(eq(AutomationTable.status, "active"), gt(AutomationTable.next_due_at, sql.placeholder("from"))))
+      .prepare()
+
     const nextWake = Effect.fnUntraced(function* (from: number) {
-      const row = yield* db
-        .select({ at: min(AutomationTable.next_due_at) })
-        .from(AutomationTable)
-        .where(and(eq(AutomationTable.status, "active"), gt(AutomationTable.next_due_at, from)))
-        .get()
-        .pipe(Effect.orDie)
+      const row = yield* nextWakeQuery.get({ from }).pipe(Effect.orDie)
       if (row?.at == null) return MAX_SLEEP
       return Math.max(0, Math.min(MAX_SLEEP, row.at - (yield* Clock.currentTimeMillis)))
     })
 
     // A crash between admission and a Session claiming the work can lose the wake. Each automation records only its
     // last admission, not earlier pending children. Inbox IDs and metadata supplied by callers are not run receipts.
-    const rewake = db
+    const rewakeQuery = db
       .selectDistinct({ sessionID: SessionInboxTable.session_id })
       .from(AutomationTable)
       .innerJoin(SessionInboxTable, eq(SessionInboxTable.id, AutomationTable.last_message_id))
-      .all()
-      .pipe(
-        Effect.orDie,
-        Effect.flatMap((rows) => Effect.forEach(rows, (row) => execution.wake(row.sessionID), { discard: true })),
-      )
+      .prepare()
+
+    const rewake = rewakeQuery.all().pipe(
+      Effect.orDie,
+      Effect.flatMap((rows) => Effect.forEach(rows, (row) => execution.wake(row.sessionID), { discard: true })),
+    )
+
+    const activeQuery = db
+      .select({ id: AutomationTable.id })
+      .from(AutomationTable)
+      .where(eq(AutomationTable.status, "active"))
+      .limit(1)
+      .prepare()
+    const activeTimerQuery = db
+      .select({ id: AutomationTable.id })
+      .from(AutomationTable)
+      .where(and(eq(AutomationTable.status, "active"), isNotNull(AutomationTable.next_due_at)))
+      .limit(1)
+      .prepare()
 
     const hasActiveRows = (timersOnly = false) =>
-      db
-        .select({ id: AutomationTable.id })
-        .from(AutomationTable)
-        .where(
-          and(eq(AutomationTable.status, "active"), timersOnly ? isNotNull(AutomationTable.next_due_at) : undefined),
-        )
-        .limit(1)
-        .get()
-        .pipe(
-          Effect.orDie,
-          Effect.map((row) => row !== undefined),
-        )
+      (timersOnly ? activeTimerQuery : activeQuery).get().pipe(
+        Effect.orDie,
+        Effect.map((row) => row !== undefined),
+      )
 
     const ownerID = randomUUID()
+    const claimLeaderQuery = db
+      .insert(KVTable)
+      .values({
+        key: LEADER_KEY,
+        value: sql.placeholder("value"),
+        time_created: sql.placeholder("now"),
+        time_updated: sql.placeholder("now"),
+      })
+      .onConflictDoUpdate({
+        target: KVTable.key,
+        set: { value: sql.placeholder("value"), time_updated: sql.placeholder("now") },
+        where: sql`json_extract(${KVTable.value}, '$.owner') = ${sql.placeholder("owner")} or json_extract(${KVTable.value}, '$.until') <= ${sql.placeholder("now")}`,
+      })
+      .returning({ key: KVTable.key })
+      .prepare()
+    const releaseLeaderQuery = db
+      .delete(KVTable)
+      .where(
+        and(eq(KVTable.key, LEADER_KEY), sql`json_extract(${KVTable.value}, '$.owner') = ${sql.placeholder("owner")}`),
+      )
+      .prepare()
     // Claim once on startup even with nothing active: a finished automation may have left a prompt pending.
     let leadership: "unchecked" | "leader" | "follower" = "unchecked"
 
     const claimLeader = Effect.fnUntraced(function* (now: number) {
-      const value = { owner: ownerID, until: now + LEADER_TTL }
-      const claimed = yield* db
-        .insert(KVTable)
-        .values({ key: LEADER_KEY, value, time_created: now, time_updated: now })
-        .onConflictDoUpdate({
-          target: KVTable.key,
-          set: { value, time_updated: now },
-          where: sql`json_extract(${KVTable.value}, '$.owner') = ${ownerID} or json_extract(${KVTable.value}, '$.until') <= ${now}`,
-        })
-        .returning({ key: KVTable.key })
-        .get()
+      const claimed = yield* claimLeaderQuery
+        .get({ owner: ownerID, now, value: { owner: ownerID, until: now + LEADER_TTL } })
         .pipe(Effect.orDie)
       return claimed !== undefined
     })
@@ -810,11 +834,7 @@ const layer = Layer.effect(
     const releaseLeader = Effect.gen(function* () {
       yield* FiberMap.clear(watches)
       leadership = "follower"
-      yield* db
-        .delete(KVTable)
-        .where(and(eq(KVTable.key, LEADER_KEY), sql`json_extract(${KVTable.value}, '$.owner') = ${ownerID}`))
-        .run()
-        .pipe(Effect.ignore)
+      yield* releaseLeaderQuery.run({ owner: ownerID }).pipe(Effect.ignore)
     })
 
     const heartbeat = Clock.currentTimeMillis.pipe(
@@ -952,20 +972,21 @@ const layer = Layer.effect(
       )
     })
 
+    const activeWatchQuery = db
+      .select()
+      .from(AutomationTable)
+      .where(
+        and(
+          eq(AutomationTable.status, "active"),
+          isNull(AutomationTable.next_due_at),
+          or(isNull(AutomationTable.retry_at), lte(AutomationTable.retry_at, sql.placeholder("now"))),
+        ),
+      )
+      .prepare()
+
     // The lease/doorbell loop also sees changes from other processes. It never polls a producer for events.
     const reconcileWatches = Effect.fnUntraced(function* (now: number) {
-      const active = yield* db
-        .select()
-        .from(AutomationTable)
-        .where(
-          and(
-            eq(AutomationTable.status, "active"),
-            isNull(AutomationTable.next_due_at),
-            or(isNull(AutomationTable.retry_at), lte(AutomationTable.retry_at, now)),
-          ),
-        )
-        .all()
-        .pipe(Effect.orDie)
+      const active = yield* activeWatchQuery.all({ now }).pipe(Effect.orDie)
       const ids = new Set(active.map((row) => row.id))
       for (const [id] of Array.from(watches)) if (!ids.has(id)) yield* FiberMap.remove(watches, id)
       for (const row of active) {
@@ -990,18 +1011,21 @@ const layer = Layer.effect(
     /** Sleeps until the doorbell rings (an automation was created or resumed) or MAX_SLEEP passes. */
     const idle = doorbell.await.pipe(Effect.timeoutOption(MAX_SLEEP))
 
+    /** With nothing active, only this process's doorbell wakes the loop: there is no timer to watch or row to poll. */
+    const dormant = doorbell.await
+
     const loop = Effect.gen(function* () {
       yield* doorbell.close
       const active = yield* hasActiveRows()
       if (!active && leadership !== "unchecked") {
         if (leadership === "leader") yield* releaseLeader
-        return yield* idle
+        return yield* dormant
       }
       const now = yield* Clock.currentTimeMillis
       if (!(yield* claimLeader(now))) {
         yield* FiberMap.clear(watches)
         leadership = "follower"
-        return yield* idle
+        return yield* (active ? idle : dormant)
       }
       if (leadership !== "leader") {
         leadership = "leader"
@@ -1009,7 +1033,7 @@ const layer = Layer.effect(
       }
       if (!active) {
         yield* releaseLeader
-        return yield* idle
+        return yield* dormant
       }
       // No timer tick or next-slot query for event-only databases; timer-only databases need no extra probe.
       if ((yield* reconcileWatches(now)) > 0 && !(yield* hasActiveRows(true))) return yield* idle
@@ -1022,7 +1046,7 @@ const layer = Layer.effect(
       )
       if (!(yield* hasActiveRows())) {
         yield* releaseLeader
-        return yield* idle
+        return yield* dormant
       }
       const wait = yield* nextWake(now)
       if (wait > 0) yield* doorbell.await.pipe(Effect.timeoutOption(wait))

@@ -1231,12 +1231,12 @@ describe("Automation", () => {
     }),
   )
 
-  it.effect("picks up an automation created by another process sharing the DB while idle", () =>
+  it.effect("waits for its own doorbell instead of polling while idle with no automations", () =>
     Effect.gen(function* () {
       const primary = yield* setup()
       const { db } = yield* Database.Service
       const runner = yield* Effect.forkChild(primary.run)
-      yield* Effect.repeat(Effect.yieldNow, { times: 5 })
+      yield* Effect.repeat(Effect.yieldNow, { times: 10 })
 
       // Insert directly into SQLite, so primary's in-memory doorbell is never opened.
       const now = yield* Clock.currentTimeMillis
@@ -1259,8 +1259,13 @@ describe("Automation", () => {
         .run()
         .pipe(Effect.orDie)
 
-      // Bounded MAX_SLEEP (30s) wakes the idle loop, claims leadership, and runs the row.
+      // With no automations the idle loop parks on the doorbell, so it neither re-reads the table nor runs the row.
       yield* TestClock.adjust("30 seconds")
+      yield* Effect.repeat(Effect.yieldNow, { times: 5 })
+      expect(yield* primary.get(externalID)).toMatchObject({ status: "active", runCount: 0 })
+
+      // A create in this process rings the doorbell; the wake claims leadership and runs the due row too.
+      yield* primary.create({ sessionID, name: "local", trigger: every("1 hour"), action: prompt("local") })
       yield* Effect.repeat(Effect.yieldNow, { times: 5 })
       yield* Fiber.interrupt(runner)
       expect(yield* primary.get(externalID)).toMatchObject({ status: "done", runCount: 1, lastOutcome: "fired" })

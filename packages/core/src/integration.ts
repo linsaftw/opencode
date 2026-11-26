@@ -507,12 +507,20 @@ const layer = Layer.effect(
       yield* close(attempt.scope)
     }, Effect.uninterruptible)
 
+    const isScrubbable = (attempt: PendingAttempt | PendingCommandAttempt | TerminalAttempt, now: number) =>
+      attempt.status === "pending"
+        ? !attempt.persisting && attempt.time.expires <= now
+        : attempt.removeAt <= now
+
     const scrub = Effect.fnUntraced(function* <Pending extends PendingAttempt | PendingCommandAttempt>(
       ref: AttemptRef<Pending>,
       expire: (attemptID: AttemptID, attempt: Pending) => Effect.Effect<void>,
     ) {
       const now = yield* Clock.currentTimeMillis
       const expired = yield* SynchronizedRef.modify(ref, (current) => {
+        // Idle ticks stay cheap: skip the map copy and sweep when nothing is due.
+        const none: [AttemptID, Pending][] = []
+        if (!Array.from(current.values()).some((attempt) => isScrubbable(attempt, now))) return [none, current]
         const next = new Map(current)
         const closed: [AttemptID, Pending][] = []
         for (const [id, attempt] of current) {
@@ -551,17 +559,16 @@ const layer = Layer.effect(
       yield* Scope.close(attempt.scope, Exit.void)
     })
 
-    yield* scrub(attempts, (attemptID, attempt) =>
-      Effect.logInfo("integration oauth attempt closed", {
-        integrationID: attempt.integrationID,
-        attemptID,
-        reason: "expired",
-      }).pipe(Effect.andThen(close(attempt.scope))),
-    ).pipe(Effect.repeat(Schedule.spaced(scrubInterval)), Effect.forkIn(scope))
-    yield* scrub(commandAttempts, (_, attempt) => close(attempt.scope)).pipe(
-      Effect.repeat(Schedule.spaced(scrubInterval)),
-      Effect.forkIn(scope),
-    )
+    yield* Effect.gen(function* () {
+      yield* scrub(attempts, (attemptID, attempt) =>
+        Effect.logInfo("integration oauth attempt closed", {
+          integrationID: attempt.integrationID,
+          attemptID,
+          reason: "expired",
+        }).pipe(Effect.andThen(close(attempt.scope))),
+      )
+      yield* scrub(commandAttempts, (_, attempt) => close(attempt.scope))
+    }).pipe(Effect.repeat(Schedule.spaced(scrubInterval)), Effect.forkIn(scope))
 
     const connectOAuth = Effect.fn("Integration.oauth.connect")(function* (input: {
       readonly integrationID: ID

@@ -1,6 +1,6 @@
 export * as KV from "./kv.js"
 
-import { and, asc, eq, gt, gte, lt } from "drizzle-orm"
+import { and, asc, eq, gt, gte, lt, sql } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Database } from "./database/database.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
@@ -37,25 +37,41 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const db = (yield* Database.Service).db
+    // Built once per layer: query building is a measurable share of idle service time. Placeholders carry the
+    // per-call values without rebuilding the SQL. Timestamps are explicit because a prepared INSERT would freeze
+    // the column's `$default` at prepare time.
+    const getQuery = db
+      .select({ value: KVTable.value })
+      .from(KVTable)
+      .where(eq(KVTable.key, sql.placeholder("key")))
+      .prepare()
+    const setQuery = db
+      .insert(KVTable)
+      .values({
+        key: sql.placeholder("key"),
+        value: sql.placeholder("value"),
+        time_created: sql.placeholder("time_created"),
+        time_updated: sql.placeholder("time_updated"),
+      })
+      .onConflictDoUpdate({
+        target: KVTable.key,
+        set: { value: sql.placeholder("value"), time_updated: sql.placeholder("time_updated") },
+      })
+      .prepare()
+    const removeQuery = db
+      .delete(KVTable)
+      .where(eq(KVTable.key, sql.placeholder("key")))
+      .prepare()
     return Service.of({
       get: Effect.fn("KV.get")(function* (key) {
-        return (yield* db
-          .select({ value: KVTable.value })
-          .from(KVTable)
-          .where(eq(KVTable.key, key))
-          .get()
-          .pipe(Effect.orDie))?.value
+        return (yield* getQuery.get({ key }).pipe(Effect.orDie))?.value
       }),
       set: Effect.fn("KV.set")(function* (key, value) {
-        yield* db
-          .insert(KVTable)
-          .values({ key, value })
-          .onConflictDoUpdate({ target: KVTable.key, set: { value, time_updated: Date.now() } })
-          .run()
-          .pipe(Effect.orDie)
+        const now = Date.now()
+        yield* setQuery.run({ key, value, time_created: now, time_updated: now }).pipe(Effect.orDie)
       }),
       remove: Effect.fn("KV.remove")(function* (key) {
-        yield* db.delete(KVTable).where(eq(KVTable.key, key)).run().pipe(Effect.orDie)
+        yield* removeQuery.run({ key }).pipe(Effect.orDie)
       }),
       scan: Effect.fn("KV.scan")(function* (options) {
         const limit = Number.isNaN(options.limit) ? 100 : Math.min(Math.max(Math.floor(options.limit ?? 100), 1), 1000)
