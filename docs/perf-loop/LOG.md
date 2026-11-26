@@ -227,3 +227,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 27: session-list index - nothing to migrate
 - session sql.ts already has session_v2_root_updated_idx, session_v2_root_project_path_updated_idx, project/workspace/parent/suspended indexes, plus message (session,type,seq), (session,time_created,id) and inbox (session,delivery,seq) covering indexes. The "session-list index migration" deferred item is not needed; removed from the open list. A real gap would need EXPLAIN QUERY PLAN on a synthetic DB (scoped test), not guessing.
+
+## Cycle 28: PTY outbox backpressure - analysed, not applied
+- persistent-pty.ts:173 `Queue.unbounded<Outbound>()` per socket, fed by `Queue.offerUnsafe` from onEvent; a slow client plus a flooding PTY grows memory without bound (verified). Only behavior-preserving fix is bounding by DISCONNECTING the lagging attachment (client reconnects with its cursor; replay buffer makes it mostly lossless but `truncated` can occur). That turns a slow-but-working `cat bigfile` over a slow link into a disconnect: user-visible behavior change, so it stays a user decision. Suggested policy if approved: byte cap (e.g. 16 MiB) tracked in runPtySocket's drain, close 1013 "client too slow", same shape as EventFeed overflow.
