@@ -108,3 +108,7 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 
 ## Gate 18 (build + install)
 - Typecheck core/cli/server clean; cache-hit test pass; 120+72 affected tests pass. Single-thread linux x64 build ok; `run --standalone` reached the provider (free-tier limit error, environmental). Installed (backup opencode.pre-cycle18-backup, cycle-17 backup deleted); service restarted, 527 MB at 20 s. Includes tool-input-repair schema cache and prompt clone gate.
+
+## Cycle 19 start
+- Post-restart log check: no unresponsive/stall entries; only terminate is my own explicit restart (20:43Z).
+- Worker pool unavailable: commandcode "insufficient credits", hy4-flash-free 429. Unit 39 (SQL scout) manual review: indexes cover session_message (session+seq, session+type+seq, session+time+id), session_part (session,message,ordinal), session_inbox (session,delivery,seq), event (aggregate,seq). Possible redundancy: session_message_time_created_idx (global) costs a write per message; removal needs a migration and a check that no query relies on it: not done.
