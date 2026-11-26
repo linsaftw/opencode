@@ -45,3 +45,8 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
   - 30 REJECTED: SSE JSON is already encoded once per event (event-feed.ts:53 `encoded ??=`); the per-subscriber cost is only string-to-bytes in the HTTP layer, and sharing bytes needs a string->Uint8Array interface change plus test churn for a gain proportional to a handful of clients.
   - 31 REJECTED (all five): well-known doc cache, global/system config cache, global agent/command/plugin scan cache and provider credential-file memo are all process-global caches whose correctness depends on watcher invalidation (stale until restart if an event is missed); the ancestor-walk arithmetic changes behaviour in stat-denying sandboxes. Candidate for a future design with explicit invalidation tests: well-known docs (HTTP per Location) and Azure `az` token reuse.
   - Observed, not chosen: MCP servers are connected per Location unless `pool: true`; changing the default alters connection/roots semantics and needs the user's decision.
+
+## Cycle 9: restart root cause
+- Log evidence (UTC): 17:35:04 a client (`opencode models`, callerPID 1725787) logged "Background service is unresponsive" streak=7 windowMs=30171 and SIGTERMed then SIGKILLed the 12-minute-old service (pid 1566874); all other clients logged "Event stream stalled". Trigger: a burst of ~30 `run --standalone` boots (worker pool + monitor) around 17:33-17:35 starved the service for just over 30 s (shared SQLite file, 5 s busy_timeout).
+- Fix: packages/client service-timing.ts unresponsiveWindow 30 s -> 120 s (commit a30a377e6a). A hung service is still replaced, after 2 min. 60 service tests pass.
+- Also seen: contender `serve --service` processes fail with "port 49374 already in use" (harmless noise).
