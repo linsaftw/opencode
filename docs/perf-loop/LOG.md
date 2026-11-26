@@ -158,3 +158,6 @@ Typecheck clean, 3459 tests pass (prompt-cache-prefix + shell), single-thread bu
 ## Scout 44 (TUI/client render; sol)
 - Applied: grouping/session.ts hasPart scans rows from the end (live part is near the tail); boolean result identical. Gain unmeasured, estimated up to ~N-row visits saved per nonblank delta.
 - Deferred: reasoning group per-ref re-resolution (needs memo design), compaction findLast miss (rare), markdown reparse (unverified).
+
+## Cycle 20 gate (TUI hasPart)
+tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo rejected (groups hold a handful of thoughts). Build+install deferred to bundle with next changes.
