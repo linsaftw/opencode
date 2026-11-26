@@ -203,3 +203,7 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - event-feed.ts: queue now carries a Frame {text, bytes?}; new `subscribeBytes` encodes UTF-8 lazily once per event and shares the Uint8Array across subscribers; `subscribe` (string) unchanged for existing callers/tests. handlers/event.ts uses subscribeBytes, pre-encodes the per-connection connected frame and the fixed heartbeat; no per-subscriber Stream.encodeText. Wire bytes identical (test asserts decode(bytes) === frame(payload) and shared identity).
 - Gate: server typecheck clean; event-feed + sse-failure + process tests 15 pass; full server suite 167 pass, 1 flaky fail (machine-link "closes every link..." 5 s timeout under load; passes alone with and without the change).
 - Gain: removes N-1 TextEncoder.encode calls per event for N subscribers (~1 us per 2 KiB each); matters with many clients only.
+
+## Scout 51 (projection/persistence) - all rejected
+- inbox pendingSteers loads full rows (verified real) but steer backlogs are 0-1 rows in practice and the compaction/move ordering rule is subtle: risk > gain.
+- message-updater Immer array copy, projectFork JSON round trip (not per-step), Bus durable-write Drizzle statement caching (Bun already caches native statements): micro/unmeasured, deferred. No code change.
