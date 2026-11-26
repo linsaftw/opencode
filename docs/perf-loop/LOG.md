@@ -182,3 +182,7 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - Applied: openai-chat.ts tool index lookup now lazy (`tool.index ?? toolIndexByID(...) ?? ...`); pure function, identical results; full ai suite 2304 pass. Gain tiny (id-bearing first delta only).
 - #1 LLM.generate event-history copy: FALSE for this checkout (appendEvent already `state.events.push`); REJECTED.
 - #2 WebSocket double decode, #3 Bedrock framing recopy, #4 partial-JSON reparse (core publisher does not trigger it): provider/path-specific, need event-equivalence work; DEFERRED.
+
+## Scout 50 (compaction; sol; line numbers did not match the checkout)
+- #1 double prompt estimate per step: STALE/FALSE here (runner/llm.ts computes `estimate` once and passes it to compact and precompute); REJECTED.
+- #2 summary delivery re-estimates, #3 native trigger history reload, #4 serialize-then-truncate tool output in summary split: all inside the compaction event (rare, seconds of LLM time); equivalence on malformed data unverified; REJECTED.
