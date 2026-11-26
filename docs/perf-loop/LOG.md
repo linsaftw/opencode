@@ -95,3 +95,8 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - Verified: core typecheck clean; permission, ripgrep, tool-edit/execute/patch/output/model-policy, prompt-cache-prefix 294 pass; policy, tool-registry, config, search, bus, session-store 339 pass.
 - Scout 35 (read endpoints): session list and messages apply cursor and LIMIT in SQL, so open/refresh is page-bounded; the whole-history reads (session.context, export, stats) are explicit commands, not refresh traffic. session.diff rescans narrow turn-boundary rows (low impact). Nothing applied.
 - Cycle 17 shipped 17:30: installed build with wildcard regex memo, ripgrep decoder hoist, edit normalizer hoist and chunked replaceAll (801bc29ae5), on top of cycles 14-15. Smoke run used a real Read tool call. Prior service ran ~24 min at low load (8-18) with no terminate/stall entries.
+
+## Cycle 18: tool-input-repair schema cache (scout 36 #1)
+- tool/runtime.ts `repairInputSchema`: WeakMap keyed by the input schema object (not the tool), used only by the read-only repair hook, replacing a per-call `definition().inputSchema` that rebuilt the full JSON Schema (toJsonSchemaDocument + flatten + inline + drop defs) for every tool call. A replaced tool with a new schema converts again; `definition()` itself is unchanged for other consumers.
+- Test test/tool-repair-schema-cache.test.ts (same schema reused, different schema converts, results equal). It caught a first version that never cached: Effect schemas are functions (`typeof` "function"), not objects.
+- Verified: core typecheck clean; repair, repair-integration, tool-execute, tool-registry, cache test 120 pass.

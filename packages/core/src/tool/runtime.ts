@@ -37,6 +37,21 @@ export const definition = (tool: Tool.Info<any, any>, codemode = false): ToolDef
   }
 }
 
+// Input repair needs the input JSON Schema on every call and only reads it. Converting an Effect schema is a full
+// traversal, so the result is kept per schema object (a schema value never changes once built); the keyed object is
+// the schema itself, not the tool, so a replaced tool with a new schema converts again.
+const repairSchemas = new WeakMap<object, JsonSchema.JsonSchema>()
+
+export const repairInputSchema = (tool: Tool.Info<any, any>, codemode = false): JsonSchema.JsonSchema => {
+  const source = codemodeOverrides(tool, codemode)?.input ?? tool.input
+  if ((typeof source !== "object" && typeof source !== "function") || source === null) return inputJsonSchema(source)
+  const hit = repairSchemas.get(source)
+  if (hit) return hit
+  const created = inputJsonSchema(source)
+  repairSchemas.set(source, created)
+  return created
+}
+
 export const execute = (tool: Tool.Info<any, any>, input: unknown, context: Tool.Context) =>
   Effect.gen(function* () {
     const overrides = codemodeOverrides(tool, context.codemode === true)

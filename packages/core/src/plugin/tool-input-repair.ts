@@ -6,7 +6,7 @@ import { Effect, JsonSchema, Option, Predicate, Schema } from "effect"
 import { toolExpression } from "@opencode/codemode"
 import { isRecord } from "@opencode/util/record"
 import { CodeModeTool } from "../codemode/tool.js"
-import { definition, normalizeContent } from "../tool/runtime.js"
+import { normalizeContent, repairInputSchema } from "../tool/runtime.js"
 
 // Repairs apply only when the input schema unambiguously supports them:
 // - Stringified root or nested object: '{"limit":"20"}' -> { limit: 20 }
@@ -53,7 +53,7 @@ export const Plugin = define({
           if (!tool) return
           const called = event.tool
           if (aliased) event.tool = aliased.id
-          const schema = definition(tool, event.codemode).inputSchema
+          const schema = repairInputSchema(tool, event.codemode)
           if (schema.type === "object") event.input = repair(event.input, schema, schema, 0)
           if (!target || !isRecord(event.input)) return
           const input = { ...event.input }
