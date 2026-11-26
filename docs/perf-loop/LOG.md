@@ -147,3 +147,10 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 
 ## Cycle 19 gate
 Typecheck clean, 3459 tests pass (prompt-cache-prefix + shell), single-thread build, installed (backup opencode.pre-cycle19-backup), service restarted. Smoke `run` blocked by free model usage limit (environmental). Changes: goal marker cleanup, shell page read copy. Gains negligible/memory-only.
+
+## Scout 42 (plugin/MCP; sol, 5th attempt worked)
+- #1 MCP guidance per-step tools.filter per instruction server: few servers x tens of tools, microseconds; REJECTED.
+- #2 plugin activation restat/rehash: daily timer + watcher; sweep is a deliberate safety net; REJECTED.
+- #3 MCP tools-changed replay: already debounced 100 ms, replay has observable effects; REJECTED.
+- #4 Plan hook `lastReminder` scan: FABRICATED (no such symbol, plan.ts is 50 lines); REJECTED.
+- #5 warming config resolve per request: in-memory scan, negligible; REJECTED.
