@@ -242,3 +242,8 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 30: PTY outbox cap implemented, then REVERTED
 - Tried a 4096-frame cap (close 1013 "client too slow" after flushing queued frames). Typecheck and persistent-pty tests passed, but no client in this repo (tui/app/client) consumes the persistent-pty socket (cursor/attachment_id/replay_complete only appear in server, protocol and process-daemon), so reconnect-with-cursor after a 1013 close is UNVERIFIED for external clients. Not shipped; reverted. Needs a user decision or the client owner's confirmation.
+
+## Scout 55 (server per-request HTTP path) - no change
+- #1 duplicate URL parses / double session-token HMAC across dispatch+authorizationLayer: microseconds per request; touching auth ordering risks the authorization decision. Rejected.
+- #2 message list: Effect.try allocated for absent cursor (trivial); the real cost (row decode + schema encode + stringify) has no behavior-identical removal per the scout itself. Rejected.
+- #3 prompt submit duplicate locationErrors wrapper: saves a wrapper only, no DB read/borrow. Rejected.
