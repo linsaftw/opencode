@@ -17,3 +17,9 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - REJECTED: unit 14 history cache (2x memory, deepEquals not cheaper), unit 15 llm runner (cwd cached across retries, dropped ...prepared spread).
 - Scout: docs/perf-loop/units/19-scout-watchers.md. Open: global skill-root scan memoization (needs invalidation design).
 - Build rule: always `--single` (linux-x64) with OPENCODE_VERSION=2.4.1 OPENCODE_CHANNEL=latest.
+
+## Cycle 3 (13:01-13:31)
+- client solid/connection.ts: event-stream reconnect now backs off exponentially (1s..30s) with jitter instead of a fixed 1s, so clients that lost an overloaded service do not re-dial in lockstep.
+- Scouts: 22 persistence (top fix: single-statement event_sequence upsert in bus.ts, deferred: touches event ordering), 23 fanout, 24 skill-scan memo design (deferred: global cache correctness hinges on watcher events).
+- REJECTED: unit 25 yield during SSE fanout (can reorder events across concurrent publishes).
+- Observed after cycle 2 install: service 31 min up, ~17% CPU, 0 stalls/unplanned shutdowns/bind failures in log since restart.
