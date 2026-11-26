@@ -105,3 +105,6 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - session/prompt.ts: `hooks.has("session","prompt")` gates structuredClone of prompt+metadata; with no hook the shallow copy (fresh arrays) is passed. `prepare` only reads it. Typecheck clean; session-prompt, session-owned 72 pass.
 - Scout 37 #2 (tool-definition copy per step) deferred: identity/reference risk, needs test first. Scout 38 pending.
 - Scout 38 (LLM encode/decode): negative findings (no whole-request validation, no repeated tool-def stringify). #1 ResponseFold rebuilds AssistantMessage per delta: real but medium risk (partial() used for error payloads); deferred until an equivalence test for partial/complete exists. Others unverified.
+
+## Gate 18 (build + install)
+- Typecheck core/cli/server clean; cache-hit test pass; 120+72 affected tests pass. Single-thread linux x64 build ok; `run --standalone` reached the provider (free-tier limit error, environmental). Installed (backup opencode.pre-cycle18-backup, cycle-17 backup deleted); service restarted, 527 MB at 20 s. Includes tool-input-repair schema cache and prompt clone gate.
