@@ -62,3 +62,4 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - #2 ModelsDev boot refresh REJECTED (scout overstated): models-dev.ts:906 returns early when stored cache metadata is within ttl, so a normal boot costs one KV read; fetches only when stale, with etag.
 - #3 migration user_version fast path and #5 project sweep delay remain deferred (medium risk / behaviour change).
 - Lesson: scout claims about "blocks boot" or "per boot" costs need a code check; 3 of 5 findings in scout 32 and 2 in scout 31 were wrong or overstated.
+- Stability check 16:23 local: cycle-10 service at 30:00 uptime, 623 MB, 0 terminate/stall/unresponsive entries, load avg 29-65 (previous service died at 12 min under similar load).
