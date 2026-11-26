@@ -70,3 +70,7 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 
 ## Cycle 13: scout 29 #1 (idle WebSocket per finished session) REJECTED
 - model-transport.ts keeps the socket and `checkpoint` after `completed` on purpose: the next turn continues from the checkpoint instead of resending the whole input. Sweeping idle sockets earlier than the existing 55 min rotation would force reconnects that lose the continuation and resend full history, which costs tokens and latency (the opposite of the goal). Provider-side idle close already ends the reader and releases the channel. Cost per idle session is one socket; no change.
+
+## Cycle 14: blob base64 cache (scout 34 #3)
+- session/blob.ts `load`: process-level LRU (64 MiB cap, insertion-order eviction, entries over a quarter of the cap skipped) of hash -> base64. Every runner step hydrated the whole window, re-reading every attachment from SQLite and re-encoding it. Blobs are content-addressed and release() deletes only unreferenced blobs, so a cached encoding cannot go stale for a row that still references it. Request bytes unchanged. Typecheck clean; session-prompt/projector/long-session-perf 101 pass; prompt-cache-prefix and blob-store pass.
+- Scout 34 other findings (row re-read/hash per step, part reload, unsupportedParts walks, estimatePrompt) need revert/compaction invalidation design; deferred. Scout 33 (SSE) still running or unread.

@@ -103,16 +103,51 @@ function rewriteInbox(row: InboxRow, file: (file: SessionStored.File) => Session
   return { ...row, payload: { ...payload, files: payload.files.map(file) } }
 }
 
+// Every runner step hydrates the whole window, so the same attachments would otherwise be read from SQLite and
+// base64-encoded again each step. Blobs are content-addressed (the hash is the content), so a cached encoding never
+// goes stale; one the database no longer holds is only looked up for rows that still reference it, and release()
+// deletes only unreferenced blobs. Insertion order doubles as LRU order; the byte cap bounds memory.
+const encodedCacheLimit = 64 * 1024 * 1024
+const encoded = new Map<string, string>()
+let encodedBytes = 0
+
+const remember = (hash: string, base64: string) => {
+  if (base64.length > encodedCacheLimit / 4) return
+  encoded.set(hash, base64)
+  encodedBytes += base64.length
+  for (const [oldest, value] of encoded) {
+    if (encodedBytes <= encodedCacheLimit) return
+    encoded.delete(oldest)
+    encodedBytes -= value.length
+  }
+}
+
 const load = Effect.fnUntraced(function* (db: DatabaseService, hashes: ReadonlySet<string>) {
   const blobs = new Map<string, string>()
-  for (const batch of DatabaseBatch.batches([...hashes], 1)) {
+  const missing: string[] = []
+  for (const hash of hashes) {
+    const hit = encoded.get(hash)
+    if (hit === undefined) {
+      missing.push(hash)
+      continue
+    }
+    // Re-insert so the entry counts as recently used.
+    encoded.delete(hash)
+    encoded.set(hash, hit)
+    blobs.set(hash, hit)
+  }
+  for (const batch of DatabaseBatch.batches(missing, 1)) {
     const found = yield* db
       .select({ hash: BlobTable.hash, data: BlobTable.data })
       .from(BlobTable)
       .where(inArray(BlobTable.hash, batch))
       .all()
       .pipe(Effect.orDie)
-    for (const blob of found) blobs.set(blob.hash, view(blob.data).toString("base64"))
+    for (const blob of found) {
+      const base64 = view(blob.data).toString("base64")
+      blobs.set(blob.hash, base64)
+      remember(blob.hash, base64)
+    }
   }
   return blobs
 })
