@@ -253,3 +253,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 32: diagnostic for slow shutdown (no behavior change)
 - util layer-node.ts trackRelease: when a layer's release (reverse-order finalizer bracket) takes >= 250 ms, log `slow layer release {layer, ms}`. Teardown.pending only names work stuck at the 10 s deadline, so a slow-but-completing shutdown (~3.3 s observed) never named its culprit. After the next restart, `rg "slow layer release" ~/.local/share/opencode/log/opencode.log` identifies what paces teardown without any live profiling. util typecheck clean, util suite 156 pass.
+
+## Cycle 32 install (cycle-24 build)
+- Installed (backup opencode.pre-cycle24-backup; cycle-23 backup deleted), restarted twice, smoke `run` returned "ok". Second restart (12 s uptime, near-empty service) logged: MCP 394 ms, Plugin 395 ms (nested in LocationServiceMap/Worktree 777 ms), process exit after ~0.8 s, SIGTERM exit 143, no SIGKILL. A long-lived busy service's restart will show the 3 s+ culprit: `rg "slow layer release" ~/.local/share/opencode/log/opencode.log`.
