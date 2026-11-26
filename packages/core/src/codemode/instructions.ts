@@ -147,7 +147,21 @@ function fit(listings: ReadonlyArray<CodeModeCatalog.Listing>, budget: number) {
 const key = Instructions.Key.make("core/codemode")
 const codec = Schema.toCodecJson(CodeModeCatalog.Summary)
 
+// Every runner step asks for the list again, but the tool snapshot reuses one inventory object until the registry
+// changes, and summarizing is a pure function of it, so the list is built once per inventory.
+const built = new WeakMap<CodeModeCatalog.Inventory, Instructions.List>()
+let removedList: Instructions.List | undefined
+
 export const make = (inventory?: CodeModeCatalog.Inventory): Instructions.List => {
+  if (inventory === undefined) return (removedList ??= build(undefined))
+  const hit = built.get(inventory)
+  if (hit) return hit
+  const list = build(inventory)
+  built.set(inventory, list)
+  return list
+}
+
+const build = (inventory?: CodeModeCatalog.Inventory): Instructions.List => {
   const catalog = inventory === undefined ? Instructions.removed : CodeModeCatalog.summarize(inventory)
   return Instructions.make({
     key,
