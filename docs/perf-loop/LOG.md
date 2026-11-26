@@ -63,3 +63,7 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - #3 migration user_version fast path and #5 project sweep delay remain deferred (medium risk / behaviour change).
 - Lesson: scout claims about "blocks boot" or "per boot" costs need a code check; 3 of 5 findings in scout 32 and 2 in scout 31 were wrong or overstated.
 - Stability check 16:23 local: cycle-10 service at 30:00 uptime, 623 MB, 0 terminate/stall/unresponsive entries, load avg 29-65 (previous service died at 12 min under similar load).
+
+## Cycle 12: migration fast path (scout 32 #3) REJECTED after reading migration.ts
+- `CREATE TABLE IF NOT EXISTS migration` on an existing table is a parse-time no-op in SQLite (no write lock taken), and the rest is one `sqlite_master` read plus one small SELECT. A `user_version` marker would add a failure mode (forgotten bump leaves a migration unapplied) to save microseconds. Not worth the risk; no change.
+- Remaining ideas are all behaviour-changing or low-yield; no code applied this cycle. Next: let the installed build gather real-use stability data.
