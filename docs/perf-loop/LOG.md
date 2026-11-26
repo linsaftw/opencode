@@ -236,3 +236,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - #2 reasoning-group visibility memo, #4 messageBoundaryIDs/weights on structural row insert: render-side, run per new part not per delta, unmeasured; deferred.
 - #3 evicted session histories can regrow from background events (session-retention vs data.ts message.update): plausible memory leak in the TUI, needs an eviction marker at the cache boundary and TUI-level tests; deferred as a candidate for a dedicated cycle.
 - Rejected claims confirmed by scout: no per-delta array spreads/sorts in client data.ts; SSE subscriber queue already capped at 4096.
+
+## Cycle 29: scout 54 #3 (evicted TUI histories regrow) - FALSE
+- Cited tui/src/context/session-retention.ts does not exist; the logic is client/src/solid/retention.ts. Its effect tracks `evicted` as `${root}:${count(id)}` per excluded session and re-evicts when background turns change a session's message count ("repopulated by background turns need eviction even when their root was already evicted"), covered by tui/test/context/session-retention.test.ts. No leak; no change.
