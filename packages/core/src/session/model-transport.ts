@@ -198,18 +198,18 @@ export const makeLayer = (connector: WebSocketConnector) =>
 
       const open = Effect.fn("SessionModelTransport.open")(function* (
         owner: State,
-        exchange: WebSocketChannelExchange,
+        connect: WebSocketChannelExchange["connect"],
         key: string,
       ) {
         return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
             const connection = yield* restore(
-              connector.open(exchange.connect).pipe(
+              connector.open(connect).pipe(
                 Effect.timeoutOrElse({
                   duration: CONNECT_TIMEOUT,
                   orElse: () =>
                     transportError("Timed out opening the Session WebSocket", {
-                      url: exchange.connect.url,
+                      url: connect.url,
                       operation: "request",
                       code: "connect-timeout",
                       phase: "connect",
@@ -241,7 +241,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
                   const active = channel.active
                   if (!active)
                     return yield* transportError("WebSocket data arrived without an active exchange", {
-                      url: exchange.connect.url,
+                      url: connect.url,
                       operation: "read",
                       code: "idle-data",
                       phase: "receive",
@@ -249,7 +249,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
                   active.delivery = "provider-observed"
                   if (typeof message !== "string")
                     return yield* transportError("Unsupported binary WebSocket frame", {
-                      url: exchange.connect.url,
+                      url: connect.url,
                       operation: "read",
                       code: "message",
                       phase: "receive",
@@ -342,7 +342,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
         if (owner.channel) yield* metric("reuse")
         const channel = owner.channel
           ? owner.channel
-          : yield* open(owner, exchange, key).pipe(
+          : yield* open(owner, exchange.connect, key).pipe(
               Effect.catch((error) => {
                 if (error.reason._tag === "Transport" && error.reason.code === "owner-closed") return Effect.fail(error)
                 // Any connect failure, transient or not, pins the Session to HTTP until restart or move:
