@@ -169,6 +169,10 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
           (item.state.status === "error" && item.state.error.type.startsWith("tool.input")),
       )
     : kept
+  // Reasoning in a cut message survives only if a tool or non-blank text follows it.
+  const lastOutput = cut
+    ? items.findLastIndex((item) => item.type === "tool" || (item.type === "text" && item.text.trim() !== ""))
+    : -1
   const content = items.flatMap((item, index): Array<AssistantMessage["content"][number]> => {
     if (item.type === "text")
       return [
@@ -180,13 +184,7 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
       ]
     // Let the destination adapter handle readable reasoning after a model/provider switch.
     if (item.type === "reasoning") {
-      if (
-        cut &&
-        !items
-          .slice(index + 1)
-          .some((after) => after.type === "tool" || (after.type === "text" && after.text.trim() !== ""))
-      )
-        return []
+      if (cut && lastOutput <= index) return []
       return sameModel
         ? [
             {
