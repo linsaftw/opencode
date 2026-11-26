@@ -210,6 +210,12 @@ export function configured(options?: Options) {
         const listeners = new Array<Subscriber>()
         const durableLocks = KeyedMutex.makeUnsafe<string>()
         const { db } = yield* Database.Service
+        // Read once per durable event; prepared so the query is not rebuilt for every commit.
+        const sequenceQuery = db
+          .select({ seq: EventSequenceTable.seq, ownerID: EventSequenceTable.owner_id })
+          .from(EventSequenceTable)
+          .where(eq(EventSequenceTable.aggregate_id, sql.placeholder("aggregateID")))
+          .prepare()
         const logReadPageSize = options?.logReadPageSize ?? 512
         const persist = options?.persist ?? false
         const sessions = new Map<SessionID, Location.Ref>()
@@ -317,12 +323,7 @@ export function configured(options?: Options) {
                   .transaction(
                     () =>
                       Effect.gen(function* () {
-                        const row = yield* db
-                          .select({ seq: EventSequenceTable.seq, ownerID: EventSequenceTable.owner_id })
-                          .from(EventSequenceTable)
-                          .where(eq(EventSequenceTable.aggregate_id, aggregateID))
-                          .get()
-                          .pipe(Effect.orDie)
+                        const row = yield* sequenceQuery.get({ aggregateID }).pipe(Effect.orDie)
                         const latest = row?.seq ?? -1
                         const encode = () =>
                           Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>

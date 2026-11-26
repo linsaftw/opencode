@@ -452,6 +452,60 @@ function run(db: DatabaseService, event: MessageEvent) {
   })
 }
 
+const preparedReadsMemo = new WeakMap<DatabaseService, ReturnType<typeof buildSessionReads>>()
+
+/**
+ * Fixed SELECTs run for nearly every durable part and step event; the `db` handle lives for the whole projector
+ * layer, so prepare them once per handle instead of rebuilding the SQL per event. Placeholders carry only the
+ * per-event values, and the columns and filters match the inline queries they replace.
+ */
+function preparedSessionReads(db: DatabaseService) {
+  const cached = preparedReadsMemo.get(db)
+  if (cached) return cached
+  const prepared = buildSessionReads(db)
+  preparedReadsMemo.set(db, prepared)
+  return prepared
+}
+
+function buildSessionReads(db: DatabaseService) {
+  return {
+    currentAssistant: db
+      .select()
+      .from(SessionMessageTable)
+      .where(
+        and(eq(SessionMessageTable.session_id, sql.placeholder("sessionID")), eq(SessionMessageTable.type, "assistant")),
+      )
+      .orderBy(desc(SessionMessageTable.seq))
+      .limit(1)
+      .prepare(),
+    assistant: db
+      .select()
+      .from(SessionMessageTable)
+      .where(
+        and(
+          eq(SessionMessageTable.id, sql.placeholder("messageID")),
+          eq(SessionMessageTable.session_id, sql.placeholder("sessionID")),
+          eq(SessionMessageTable.type, "assistant"),
+        ),
+      )
+      .prepare(),
+    assistantParts: db
+      .select({
+        seq: SessionMessageTable.seq,
+        inlineCount: sql<number>`json_array_length(${SessionMessageTable.data}, '$.content')`,
+      })
+      .from(SessionMessageTable)
+      .where(
+        and(
+          eq(SessionMessageTable.id, sql.placeholder("messageID")),
+          eq(SessionMessageTable.session_id, sql.placeholder("sessionID")),
+          eq(SessionMessageTable.type, "assistant"),
+        ),
+      )
+      .prepare(),
+  }
+}
+
 /** Assistant reads shared by both write paths; `decode` decides whether part rows are folded into `content`. */
 function assistantReads(
   db: DatabaseService,
@@ -462,15 +516,8 @@ function assistantReads(
     getCurrentAssistant() {
       return Effect.gen(function* () {
         // A newer step supersedes stale incomplete rows; never resume an older assistant projection.
-        const row = yield* db
-          .select()
-          .from(SessionMessageTable)
-          .where(
-            and(eq(SessionMessageTable.session_id, event.data.sessionID), eq(SessionMessageTable.type, "assistant")),
-          )
-          .orderBy(desc(SessionMessageTable.seq))
-          .limit(1)
-          .get()
+        const row = yield* preparedSessionReads(db)
+          .currentAssistant.get({ sessionID: event.data.sessionID })
           .pipe(Effect.orDie)
         if (!row || ("completed" in row.data.time && row.data.time.completed)) return
         const message = yield* decode(row)
@@ -479,17 +526,8 @@ function assistantReads(
     },
     getAssistant(messageID) {
       return Effect.gen(function* () {
-        const row = yield* db
-          .select()
-          .from(SessionMessageTable)
-          .where(
-            and(
-              eq(SessionMessageTable.id, messageID),
-              eq(SessionMessageTable.session_id, event.data.sessionID),
-              eq(SessionMessageTable.type, "assistant"),
-            ),
-          )
-          .get()
+        const row = yield* preparedSessionReads(db)
+          .assistant.get({ messageID, sessionID: event.data.sessionID })
           .pipe(Effect.orDie)
         if (!row) return
         const message = yield* decode(row)
@@ -625,20 +663,8 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
    * owner the message's part refs belong to.
    */
   const prepareAssistantParts = Effect.fnUntraced(function* (messageID: SessionMessage.ID, carry: boolean) {
-    const row = yield* db
-      .select({
-        seq: SessionMessageTable.seq,
-        inlineCount: sql<number>`json_array_length(${SessionMessageTable.data}, '$.content')`,
-      })
-      .from(SessionMessageTable)
-      .where(
-        and(
-          eq(SessionMessageTable.id, messageID),
-          eq(SessionMessageTable.session_id, event.data.sessionID),
-          eq(SessionMessageTable.type, "assistant"),
-        ),
-      )
-      .get()
+    const row = yield* preparedSessionReads(db)
+      .assistantParts.get({ messageID, sessionID: event.data.sessionID })
       .pipe(Effect.orDie)
     if (!row) return
     const full =
