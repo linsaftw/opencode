@@ -286,3 +286,8 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - Small and rare (tens to hundreds of small entries per year): settled forms swept lazily, jobs for deleted owners never acknowledged, aisdk languages/sdks and bus session routes without eviction, ollama roots, WebSocket owner entries per session.
 - Not taken: every fix either changes delivery semantics or saves a negligible amount against its risk. The bus multi-type pre-filter is the only one worth a design pass if a subscriber backlog is ever observed.
 - Verified in code: scout 58's top claim is FALSE. bus.ts subscribe(definitions) already registers one unbounded PubSub per subscription under each requested type in pubsub.typed and publish routes by event.type (bus.ts:505-507, 737-757); only subscribe() with no argument reads the whole live stream. No pre-filter change needed.
+
+## Scout 59: per-delta stream to part projection (no change)
+- Result: text deltas never reach the projector or the DB. The runner coalesces chunks into ephemeral session.text.delta events on a 100 ms timer and persists the full text once per block on text.ended (one whole-row write; persistence tests assert no delta rows). So there is no per-chunk quadratic DB or JSON work.
+- The only quadratic candidate, `pending += value` inside one unflushed batch, is not proven: JS engines concatenate strings as ropes, so `+=` is amortized, and a 100 ms batch is small. Not changed.
+- Per-batch bus route scratch maps and a duplicate start check in the OpenAI Responses handler are fixed-size constants; not worth touching.
