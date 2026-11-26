@@ -186,3 +186,7 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 ## Scout 50 (compaction; sol; line numbers did not match the checkout)
 - #1 double prompt estimate per step: STALE/FALSE here (runner/llm.ts computes `estimate` once and passes it to compact and precompute); REJECTED.
 - #2 summary delivery re-estimates, #3 native trigger history reload, #4 serialize-then-truncate tool output in summary split: all inside the compaction event (rare, seconds of LLM time); equivalence on malformed data unverified; REJECTED.
+
+## Scout 49 (packages/ai request encoding; sol)
+- #1 Anthropic prefix rescan per system update, #3 tool-result array spreads, #4 tool-name flatten allocs, #5 sanitizeSurrogates rebuild: each sub-millisecond at 500 messages (whole request build measured 0.27 ms/750 msgs); REJECTED.
+- #2 Responses WebSocket discards a full-frame encode (opt-in transport only; ~1-3 ms at 1 MiB history): byte-equivalence work needed for full/delta frames; DEFERRED.
