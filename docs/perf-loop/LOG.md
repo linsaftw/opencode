@@ -161,3 +161,8 @@ Typecheck clean, 3459 tests pass (prompt-cache-prefix + shell), single-thread bu
 
 ## Cycle 20 gate (TUI hasPart)
 tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo rejected (groups hold a handful of thoughts). Build+install deferred to bundle with next changes.
+
+## Scout 45 (server HTTP/SSE; sol)
+- #1 SSE per-subscriber UTF-8 encode (JSON already shared once): verified; ~1 us per 2 KiB frame, matters only with ~100 subscribers; fix changes EventFeed Stream<string> interface and test seams; REJECTED (revisit if many-client use appears).
+- #2 double authorization on ready managed requests: deliberate two gates; REJECTED.
+- #3 permission.forSession filter over pending: pending count is tiny in practice; REJECTED.
