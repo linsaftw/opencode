@@ -230,3 +230,9 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 
 ## Cycle 28: PTY outbox backpressure - analysed, not applied
 - persistent-pty.ts:173 `Queue.unbounded<Outbound>()` per socket, fed by `Queue.offerUnsafe` from onEvent; a slow client plus a flooding PTY grows memory without bound (verified). Only behavior-preserving fix is bounding by DISCONNECTING the lagging attachment (client reconnects with its cursor; replay buffer makes it mostly lossless but `truncated` can occur). That turns a slow-but-working `cat bigfile` over a slow link into a disconnect: user-visible behavior change, so it stays a user decision. Suggested policy if approved: byte cap (e.g. 16 MiB) tracked in runPtySocket's drain, close 1013 "client too slow", same shape as EventFeed overflow.
+
+## Scout 54 (TUI streaming render/state) - no change
+- #1 Markdown re-lex per delta lives in node_modules @opentui/core (third party, not our code); not patched. Shared trimmed-content memo in TextPart alone saves one trim.
+- #2 reasoning-group visibility memo, #4 messageBoundaryIDs/weights on structural row insert: render-side, run per new part not per delta, unmeasured; deferred.
+- #3 evicted session histories can regrow from background events (session-retention vs data.ts message.update): plausible memory leak in the TUI, needs an eviction marker at the cache boundary and TUI-level tests; deferred as a candidate for a dedicated cycle.
+- Rejected claims confirmed by scout: no per-delta array spreads/sorts in client data.ts; SSE subscriber queue already capped at 4096.
