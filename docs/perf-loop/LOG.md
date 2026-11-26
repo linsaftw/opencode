@@ -144,3 +144,6 @@ Note: build-all-2 service was hot only in the real environment (plugins/MCP/clie
 - Applied: shell.ts readRange no longer copies Buffer chunks twice (typeof string check).
 - Deferred (behaviour/timing change, needs design): PTY WebSocket unbounded outbox (needs lossless backpressure/spill), spawned shell file-stream backpressure (could change timeouts).
 - Scout 42 (plugin/MCP) blocked by worker external_directory in 4 attempts; retry later.
+
+## Cycle 19 gate
+Typecheck clean, 3459 tests pass (prompt-cache-prefix + shell), single-thread build, installed (backup opencode.pre-cycle19-backup), service restarted. Smoke `run` blocked by free model usage limit (environmental). Changes: goal marker cleanup, shell page read copy. Gains negligible/memory-only.
