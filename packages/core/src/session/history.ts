@@ -168,13 +168,15 @@ export const decodeMessageRow = (row: typeof SessionMessageTable.$inferSelect) =
   decode(rowInput(row)).pipe(Effect.mapError(decodeError(row)))
 
 // Every step reloads the whole uncompacted window, and decoding is a pure function of the row, so completed
-// history decodes once. The key hashes the exact decode input (parts and hydrated blobs included), so an edited,
+// history decodes once. The key hashes the row after its parts are merged and before blobs are hydrated (a media ref is
+// content-addressed, so the same ref hydrates to the same bytes), so an edited,
 // pruned or re-hydrated row misses instead of reading stale.
 const decodeCache = new Map<string, { readonly hash: number | bigint; readonly message: SessionMessage.Info }>()
 const decodeCacheLimit = 4000
 
-const decodeMessageRowCached = (row: typeof SessionMessageTable.$inferSelect) => {
-  const hash = Bun.hash(JSON.stringify(row.data) + row.type)
+const rowHash = (row: typeof SessionMessageTable.$inferSelect) => Bun.hash(JSON.stringify(row.data) + row.type)
+
+const decodeMessageRowCached = (row: typeof SessionMessageTable.$inferSelect, hash: number | bigint) => {
   const hit = decodeCache.get(row.id)
   if (hit && hit.hash === hash) return Effect.succeed(hit.message)
   return decodeMessageRow(row).pipe(
@@ -255,9 +257,18 @@ const messageEntries = Effect.fnUntraced(function* (
     .orderBy(asc(SessionMessageTable.seq))
     .all()
     .pipe(Effect.orDie)
+  const merged = yield* withParts(db, rows)
+  const hashes = merged.map(rowHash)
+  // Rows that are already decoded skip blob hydration too: a media ref names its content, so a row whose merged data
+  // is unchanged hydrates to the same bytes.
+  const stale = merged.filter((row, index) => decodeCache.get(row.id)?.hash !== hashes[index])
+  const hydrated = new Map((yield* SessionBlob.hydrate(db, stale)).map((row) => [row.id, row]))
   const decoded = yield* Effect.forEach(
-    yield* SessionBlob.hydrate(db, yield* withParts(db, rows)),
-    (row) => decodeMessageRowCached(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+    merged,
+    (row, index) =>
+      decodeMessageRowCached(hydrated.get(row.id) ?? row, hashes[index]).pipe(
+        Effect.map((message) => ({ seq: row.seq, message })),
+      ),
     { concurrency: 1 },
   )
   // A window that cannot replay leaves nothing to start from, so read from the compaction before it.
