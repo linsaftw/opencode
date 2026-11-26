@@ -217,3 +217,7 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 - #1 double prompt estimate: same candidate rejected earlier (estimate already shared).
 - #2 double preview in tool-output.truncate: STALE - code already cuts once (afterLines/byteBoundary); tool/preview.ts does not exist.
 - #3 narrow permission read models, #4 history window as scalar subquery (needs query-plan check, row-validation risk), #5 skip Effect traversal for non-image normalizeImages: small, unmeasured; deferred.
+
+## Cycle 25 decision: stop shipping micro-edits
+- Scout 53 #5 (skip normalizeImages traversal for non-image results) re-read: saves microseconds per tool call, changes returned array identity. Not applied.
+- Status: every measured/verified hot-path win is shipped (cycle 23 installed). Remaining candidates are unmeasured micro-wins. Next productive step needs a scoped teardown/live profile (user permission) or a design decision (PTY backpressure, session-list index).
