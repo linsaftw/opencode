@@ -221,3 +221,6 @@ tui typecheck clean; 107 row/grouping/data tests pass. Reasoning-group memo reje
 ## Cycle 25 decision: stop shipping micro-edits
 - Scout 53 #5 (skip normalizeImages traversal for non-image results) re-read: saves microseconds per tool call, changes returned array identity. Not applied.
 - Status: every measured/verified hot-path win is shipped (cycle 23 installed). Remaining candidates are unmeasured micro-wins. Next productive step needs a scoped teardown/live profile (user permission) or a design decision (PTY backpressure, session-list index).
+
+## Cycle 26: continuation checkpoint slimming - rejected
+- open-responses-continuation.ts: the checkpoint value ({version, responseID, request, output}) is the persisted/transported checkpoint contract; `incremental` needs the full previous input for an exact element-wise canonical comparison. Storing a derived canonical form changes the checkpoint format (VERSION bump, stored-checkpoint compatibility) and the exact-compare semantics for a bounded, once-per-session retention. Risk > gain; not applied. Would need a user decision on checkpoint format migration.
