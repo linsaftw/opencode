@@ -315,14 +315,25 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
     yield* InstructionState.initialize(db, event.data.sessionID, event.durable.seq, event.data.instructions)
 })
 
+// Keyed by the entries array identity: reloads hand back a new array, so a cached flag never outlives its config.
+const partRowsMemo = new WeakMap<object, boolean>()
+
 /**
  * Reads `experimental.part_rows` from the Config in scope on every call. Part rows are on unless a config sets it to
  * false, which keeps the whole-message write path as an escape hatch; without a Config they are on.
+ *
+ * `entries()` hands back the loaded document array itself and a reload replaces it, so the resolved flag is memoized
+ * by that array's identity: every event reuses the last resolution, a reload resolves it again.
  */
 const partRowsEnabled = Effect.gen(function* () {
   const config = yield* Effect.serviceOption(Config.Service)
   if (Option.isNone(config)) return true
-  return Config.latest(yield* config.value.entries(), "experimental")?.part_rows !== false
+  const entries = yield* config.value.entries()
+  const cached = partRowsMemo.get(entries)
+  if (cached !== undefined) return cached
+  const enabled = Config.latest(entries, "experimental")?.part_rows !== false
+  partRowsMemo.set(entries, enabled)
+  return enabled
 })
 
 type MessageRow = typeof SessionMessageTable.$inferSelect
@@ -616,7 +627,6 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
   const prepareAssistantParts = Effect.fnUntraced(function* (messageID: SessionMessage.ID, carry: boolean) {
     const row = yield* db
       .select({
-        id: SessionMessageTable.id,
         seq: SessionMessageTable.seq,
         inlineCount: sql<number>`json_array_length(${SessionMessageTable.data}, '$.content')`,
       })
@@ -706,18 +716,13 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
         const owner = yield* prepareAssistantParts(messageID, true)
         if (!owner) return
         const data = SessionHistory.encodePart(yield* SessionBlob.externalizePart(db, part))
-        const next = yield* db
-          .select({ ordinal: sql<number>`coalesce(max(${SessionPartTable.ordinal}) + 1, 0)` })
-          .from(SessionPartTable)
-          .where(eq(SessionPartTable.message_id, messageID))
-          .get()
-          .pipe(Effect.orDie)
         yield* db
           .insert(SessionPartTable)
           .values({
             message_id: messageID,
             session_id: event.data.sessionID,
-            ordinal: next?.ordinal ?? 0,
+            // Read the next ordinal inside the insert instead of selecting it first: same value, one round trip.
+            ordinal: sql`(select coalesce(max(${SessionPartTable.ordinal}) + 1, 0) from ${SessionPartTable} where ${SessionPartTable.message_id} = ${messageID})`,
             type: part.type,
             call_id: part.type === "tool" ? part.id : null,
             time_created: event.created,
@@ -731,14 +736,29 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
     },
     updateAssistantPart(messageID, match, recipe) {
       return Effect.gen(function* () {
-        const owner = yield* prepareAssistantParts(messageID, true)
-        if (!owner) return
-        const row = yield* db
-          .select()
-          .from(SessionPartTable)
-          .where(
+        // One read covers both the message (existence, seq, legacy inline content) and the latest matching part.
+        // A row that still carries inline content takes the carry path below and re-reads the part afterwards,
+        // because carrying appends those parts before the match is resolved.
+        const found = yield* db
+          .select({
+            seq: SessionMessageTable.seq,
+            inlineCount: sql<number>`json_array_length(${SessionMessageTable.data}, '$.content')`,
+            part: {
+              message_id: SessionPartTable.message_id,
+              session_id: SessionPartTable.session_id,
+              ordinal: SessionPartTable.ordinal,
+              type: SessionPartTable.type,
+              call_id: SessionPartTable.call_id,
+              time_created: SessionPartTable.time_created,
+              time_updated: SessionPartTable.time_updated,
+              data: SessionPartTable.data,
+            },
+          })
+          .from(SessionMessageTable)
+          .leftJoin(
+            SessionPartTable,
             and(
-              eq(SessionPartTable.message_id, messageID),
+              eq(SessionPartTable.message_id, SessionMessageTable.id),
               eq(SessionPartTable.session_id, event.data.sessionID),
               eq(SessionPartTable.type, match.type),
               match.callID !== undefined ? eq(SessionPartTable.call_id, match.callID) : undefined,
@@ -747,10 +767,44 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
                 : undefined,
             ),
           )
+          .where(
+            and(
+              eq(SessionMessageTable.id, messageID),
+              eq(SessionMessageTable.session_id, event.data.sessionID),
+              eq(SessionMessageTable.type, "assistant"),
+            ),
+          )
           .orderBy(desc(SessionPartTable.ordinal))
           .limit(1)
           .get()
           .pipe(Effect.orDie)
+        if (!found) return
+        const owner =
+          found.inlineCount > 0
+            ? yield* prepareAssistantParts(messageID, true)
+            : { sessionID: event.data.sessionID, messageID, seq: found.seq }
+        if (!owner) return
+        const row =
+          found.inlineCount > 0
+            ? yield* db
+                .select()
+                .from(SessionPartTable)
+                .where(
+                  and(
+                    eq(SessionPartTable.message_id, messageID),
+                    eq(SessionPartTable.session_id, event.data.sessionID),
+                    eq(SessionPartTable.type, match.type),
+                    match.callID !== undefined ? eq(SessionPartTable.call_id, match.callID) : undefined,
+                    match.incompleteReasoning
+                      ? sql`json_extract(${SessionPartTable.data}, '$.time.completed') is null`
+                      : undefined,
+                  ),
+                )
+                .orderBy(desc(SessionPartTable.ordinal))
+                .limit(1)
+                .get()
+                .pipe(Effect.orDie)
+            : found.part
         if (!row) return
 
         const current = SessionHistory.decodePartRowSync(row) as Extract<

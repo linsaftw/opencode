@@ -104,6 +104,20 @@ export const outputLimit = (limit: Model.Info["limit"], inputTokens?: Input["inp
   return Math.min(requested, Math.max(OUTPUT_TOKEN_MIN, room))
 }
 
+// Stored messages decode to stable objects (see `SessionHistory`), so their conversion is pure per message and model
+// and can be reused across steps. Attachment text is base64-decoded there, which is the expensive part of a step.
+const convertedMessages = new WeakMap<
+  SessionMessage.Info,
+  { readonly key: string; readonly items: ReturnType<typeof toLLMMessages> }
+>()
+const toConvertedMessages = (message: SessionMessage.Info, model: Model.Ref, providerMetadataKey: string) => {
+  const key = `${providerMetadataKey}\u0000${model.providerID}\u0000${model.id}\u0000${model.variant ?? ""}`
+  const hit = convertedMessages.get(message)
+  if (hit !== undefined && hit.key === key) return hit.items
+  const items = toLLMMessages([message], model, providerMetadataKey)
+  convertedMessages.set(message, { key, items })
+  return items
+}
 export const baseTranscript = (input: {
   readonly agent: Agent.Info
   readonly model: SessionRunnerModel.Resolved
@@ -127,7 +141,7 @@ export const baseTranscript = (input: {
     ].filter((part) => part.text.length > 0),
     // Hooks read each stored message's metadata on the messages built from it; `prepare` strips it before the request.
     messages: input.messages.flatMap((message) =>
-      toLLMMessages([message], input.model.ref, providerMetadataKey).map(
+      toConvertedMessages(message, input.model.ref, providerMetadataKey).map(
         (item): SessionRequestMessage =>
           message.metadata === undefined || item.id !== message.id ? item : { ...item, metadata: message.metadata },
       ),
@@ -215,23 +229,39 @@ const replaceMedia = (
 const sameParts = (next: ReadonlyArray<ContentPart>, previous: ReadonlyArray<ContentPart>) =>
   next.every((part, index) => part === previous[index])
 
+const MEDIA_MODALITIES = ["image", "audio", "video", "pdf"] as const
 export const unsupportedParts = (
   messages: LLMRequest["messages"],
   capabilities: Model.Capabilities,
   provider?: string,
-) => replaceMedia(messages, (media) => unsupportedMedia(media.mime, media.name, capabilities, provider))
-
-export const boundImages = (messages: LLMRequest["messages"]) => {
-  const isImage = (mime: string) => mime.toLowerCase().startsWith("image/")
-  const sizes = messages.flatMap((message) =>
-    message.content.flatMap((part) => {
-      if (part.type === "media") return isImage(part.media.mediaType) ? [mediaBytes(part.media)] : []
-      if (part.type !== "tool-result" || part.result.type !== "content") return []
-      return part.result.value.flatMap((item: Content) =>
-        item.type === "file" && isImage(item.mime) ? [item.uri.length] : [],
-      )
-    }),
+) => {
+  // A model that accepts every modality, and is not xAI, never rejects a part, so skip walking the whole transcript.
+  if (
+    provider !== "xai" &&
+    MEDIA_MODALITIES.every((modality) => capabilities.input.some((item) => item.startsWith(modality)))
   )
+    return messages
+  return replaceMedia(messages, (media) => unsupportedMedia(media.mime, media.name, capabilities, provider))
+}
+
+const isImage = (mime: string) => mime.toLowerCase().startsWith("image/")
+// Messages keep their content, so their image sizes are pure per message and reused across steps.
+const imageSizes = new WeakMap<LLMRequest["messages"][number], ReadonlyArray<number>>()
+const messageImageSizes = (message: LLMRequest["messages"][number]) => {
+  const cached = imageSizes.get(message)
+  if (cached !== undefined) return cached
+  const sizes = message.content.flatMap((part) => {
+    if (part.type === "media") return isImage(part.media.mediaType) ? [mediaBytes(part.media)] : []
+    if (part.type !== "tool-result" || part.result.type !== "content") return []
+    return part.result.value.flatMap((item: Content) =>
+      item.type === "file" && isImage(item.mime) ? [item.uri.length] : [],
+    )
+  })
+  imageSizes.set(message, sizes)
+  return sizes
+}
+export const boundImages = (messages: LLMRequest["messages"]) => {
+  const sizes = messages.flatMap(messageImageSizes)
   // Replay the images in order, dropping the oldest down to the target whenever the kept payload passes the trigger.
   // A new image then moves the cut only every (trigger - target) bytes instead of on every request, so the replaced
   // prefix, and with it the provider's prompt cache, stays the same between cuts.
@@ -251,6 +281,16 @@ export const boundImages = (messages: LLMRequest["messages"]) => {
   })
 }
 
+// Tool schemas are converted once at registration and never change, so serialize one once and parse a fresh copy per
+// step: a hook may edit the copy in place.
+const schemaJson = new WeakMap<object, string>()
+const copySchema = (schema: object) => {
+  const cached = schemaJson.get(schema)
+  if (cached !== undefined) return JSON.parse(cached)
+  const json = JSON.stringify(schema)
+  schemaJson.set(schema, json)
+  return JSON.parse(json)
+}
 type Definitions = PluginHooks.Domains["session"]["context"]["tools"]
 
 /** Builds the model request for each session flow. Each entry runs its own plugin hook. */
@@ -284,9 +324,7 @@ export const layer = Layer.effect(
       // Definitions are shared across steps and sessions, and hooks may edit schemas in place,
       // so each hook gets a deep copy.
       const given = new Map(
-        tools.definitions.map(
-          (t) => [{ description: t.description, input: JSON.parse(JSON.stringify(t.inputSchema)) }, t] as const,
-        ),
+        tools.definitions.map((t) => [{ description: t.description, input: copySchema(t.inputSchema) }, t] as const),
       )
       // Hooks see the default output limit and may change or remove it. Titles and generate keep the provider default,
       // because their reasoning is hard to budget.
