@@ -88,3 +88,8 @@
 - to-llm-message cache (reverted): per-message conversion is already flatMapped per step in `baseTranscript`; 40 messages cost 0.38 ms/step uncached vs 0.004 ms/step with an identity WeakMap (about 40 conversions/step down to 0 on unchanged rows).
 - Retained heap of cached output: 40 messages 36 outputs, about -0.1 MB (noise); 400 messages 412 outputs, 267 KB against a 94.6 KB history (282%, far over the 10% bar), so the cache was reverted and src is unchanged.
 - Decision: no cache. The 0.37 ms saving per step is not worth retaining 2.8x the history; revisit only if conversion shows up in a windowed profile.
+
+- Conversation-path windowed profile (commit 349605ecea, bun --cpu-prof, fake provider, warmup 3 then 25 conversations, 3 SSE clients, graceful SIGINT exit): driven wall 2.11 s, process ticks 189 (1890 ms incl. GC/JIT threads) = 75.6 cpu-ms per conversation; busy main thread 883 ms in the window.
+- Composition of busy main thread (self time, heuristic): bun:sqlite `query` native 60.7% (sqlite/db bucket), Effect fiber/layer 28.8%, other 7.3%, bus 2.3%, HTTP 0.5%, SSE 0.3%. Only 100 window samples; sampling is coarse, so treat shares as +-10 points.
+- Caller attribution for the sqlite share is lost (Effect fibers run from async scope; 73 of 100 samples have no repo frame). No src changed: no statement is proven avoidable yet.
+- Candidates: packages/core/src/session/search-index.ts:306-310 (FTS triggers reindex on session_part/session_message updates), packages/core/src/session/store.ts:131-148 (full history read per step), packages/core/src/database/database.ts (statement prepare per call in @effect/sql-sqlite-bun SqliteClient.js:102). Next: time each SQL class with a probe before choosing a fix.
