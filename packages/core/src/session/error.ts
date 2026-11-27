@@ -11,6 +11,15 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Session.
   sessionID: SessionSchema.ID,
 }) {}
 
+export class InvalidListCursorError extends Schema.TaggedError<InvalidListCursorError>()(
+  "Session.InvalidListCursorError",
+  {},
+) {
+  override get message() {
+    return "Invalid cursor"
+  }
+}
+
 export class MessageNotFoundError extends Schema.TaggedError<MessageNotFoundError>()("Session.MessageNotFoundError", {
   sessionID: SessionSchema.ID,
   messageID: SessionMessage.ID,
@@ -75,6 +84,12 @@ export class CompactionConflictError extends Schema.TaggedError<CompactionConfli
     inputID: SessionMessage.ID,
   },
 ) {}
+
+/** Experimental: a requested session cwd that cannot be used, such as a missing directory or an unknown machine. */
+export class CwdError extends Schema.TaggedError<CwdError>()("Session.CwdError", {
+  cwd: Schema.String,
+  message: Schema.String,
+}) {}
 
 export class BusyError extends Schema.TaggedError<BusyError>()("Session.BusyError", {
   sessionID: SessionSchema.ID,

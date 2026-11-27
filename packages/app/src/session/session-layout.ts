@@ -6,9 +6,9 @@ import { useWorkspaceLocation } from "@/workspaces/location"
 import { useServerSDK } from "@/runtime/server/client"
 import { base64Encode } from "@opencode/util/encode"
 import { ServerConnection } from "@/runtime/server/registry"
-import { findSessionTab, tabKey, useTabs } from "@/shell/tabs/tabs"
+import { tabKey, useTabs } from "@/shell/tabs/tabs"
 
-export const useSessionKey = () => {
+const useSessionKey = () => {
   const params = useParams()
   const sdk = useWorkspaceLocation()
   const serverSDK = useServerSDK()
@@ -25,22 +25,36 @@ export const useSessionLayout = () => {
   const tabs = useTabs()
   const { params, sessionKey, workspaceKey } = useSessionKey()
   const serverSDK = useServerSDK()
+  const location = useWorkspaceLocation()
 
   const currentTab = createMemo(() => {
     if (!params.id) return
 
-    return findSessionTab(tabs.store, ServerConnection.key(serverSDK.server), params.id)
+    return tabs.sessionTab(ServerConnection.key(serverSDK.server), params.id)
+  })
+
+  const panelKey = createMemo(() => {
+    const tab = currentTab()
+    const sessionID = tab?.type === "session" ? tab.sessionId : params.id
+
+    return SessionStateKey.from(
+      serverSDK.scope,
+      SessionRouteKey.fromRoute(base64Encode(location().directory), sessionID),
+    )
   })
 
   const regions = {
-    dockOpened: () => tabs.region(currentTab(), "dock"),
-    setDockOpened: (opened: boolean) => tabs.setRegion(currentTab(), "dock", opened),
-    dockHeight: () => tabs.regionSize(currentTab(), "dockHeight"),
-    setDockHeight: (height: number) => tabs.setRegionSize(currentTab(), "dockHeight", height),
     sideOpened: () => tabs.region(currentTab(), "side"),
     setSideOpened: (opened: boolean) => tabs.setRegion(currentTab(), "side", opened),
+    // The bottom pane shows whenever it holds tabs until the user hides it.
+    bottomOpened: () => tabs.region(currentTab(), "bottom", true),
+    setBottomOpened: (opened: boolean) => tabs.setRegion(currentTab(), "bottom", opened),
     sessionWidth: () => tabs.regionSize(currentTab(), "sessionWidth"),
     setSessionWidth: (width: number) => tabs.setRegionSize(currentTab(), "sessionWidth", width),
+    bottomHeight: () => tabs.regionSize(currentTab(), "bottomHeight"),
+    setBottomHeight: (height: number) => tabs.setRegionSize(currentTab(), "bottomHeight", height),
+    splitRatio: () => tabs.regionSize(currentTab(), "splitRatio"),
+    setSplitRatio: (ratio: number) => tabs.setRegionSize(currentTab(), "splitRatio", ratio),
   }
 
   return {
@@ -52,7 +66,8 @@ export const useSessionLayout = () => {
 
       return tab && tabKey(tab)
     }),
-    tabs: createMemo(() => layout.tabs(sessionKey)),
+    // A child session shows its root session's panels, so both keep one strip.
+    tabs: createMemo(() => layout.tabs(panelKey)),
     view: createMemo(() => layout.view(sessionKey, regions)),
   }
 }

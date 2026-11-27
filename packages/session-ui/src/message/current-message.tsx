@@ -8,7 +8,15 @@ import {
   CurrentReadToolGroup,
   ToolDisplay,
 } from "../tools/tool-renderer"
-import { currentToolError, currentToolInput, currentToolMetadata, currentToolOutput } from "./current-tool-state"
+import {
+  currentToolError,
+  currentToolImages,
+  currentToolInput,
+  currentToolMetadata,
+  currentToolOutput,
+} from "./current-tool-state"
+import type { UserRun } from "../timeline/user-runs"
+import type { TurnSources } from "../sources/sources"
 
 export type { SessionUserActions, SessionUserAttachmentReference, SessionUserComment } from "../actions"
 
@@ -26,6 +34,15 @@ export function SessionUserMessage(props: {
   historicalAgent: string
   historicalModel: SessionMessageAssistant["model"]
   actions?: SessionUserActions
+  run?: UserRun
+  /** The newest delivered prompt, whose revert undoes the last turn. */
+  latest?: boolean
+  runSnaps?: () => boolean
+  runHovered?: boolean
+  onMenuOpenChange?: (open: boolean) => void
+  fold?: boolean
+  expanded?: boolean
+  onExpandedChange?: (expanded: boolean) => void
 }) {
   return (
     <CurrentUserMessageDisplay
@@ -38,6 +55,14 @@ export function SessionUserMessage(props: {
       agent={props.historicalAgent}
       model={props.historicalModel}
       actions={props.actions}
+      run={props.run}
+      latest={props.latest}
+      runSnaps={props.runSnaps}
+      runHovered={props.runHovered}
+      onMenuOpenChange={props.onMenuOpenChange}
+      fold={props.fold}
+      expanded={props.expanded}
+      onExpandedChange={props.onExpandedChange}
     />
   )
 }
@@ -47,7 +72,11 @@ export function SessionAssistantContent(props: {
   content: SessionMessageAssistant["content"][number]
   contentID: string
   showAssistantCopyPartID?: string | null
+  keepCopyVisible?: boolean
   turnDurationMs?: number | null
+  turnTokensPerSecond?: number
+  sources?: TurnSources
+  onOpenSources?: () => void
   defaultOpen?: boolean
   reasoningDefaultOpen?: boolean
   toolOpen?: boolean
@@ -63,7 +92,11 @@ export function SessionAssistantContent(props: {
             text={content().text}
             message={props.message}
             showCopy={props.showAssistantCopyPartID === props.contentID}
+            keepCopyVisible={props.keepCopyVisible}
             turnDurationMs={props.turnDurationMs}
+            turnTokensPerSecond={props.turnTokensPerSecond}
+            sources={props.sources}
+            onOpenSources={props.onOpenSources}
           />
         )}
       </Match>
@@ -88,6 +121,7 @@ export function SessionAssistantContent(props: {
             input={currentToolInput(tool())}
             metadata={currentToolMetadata(tool())}
             output={currentToolOutput(tool())}
+            images={currentToolImages(tool())}
             status={tool().state.status}
             error={currentToolError(tool())}
             defaultOpen={props.defaultOpen}

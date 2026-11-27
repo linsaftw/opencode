@@ -3,17 +3,16 @@ export * as Watcher from "./watcher.js"
 // @ts-ignore
 import { createWrapper } from "@parcel/watcher/wrapper.js"
 import type ParcelWatcher from "@parcel/watcher"
-import { FileSystem } from "@opencode/schema/filesystem"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
-import { Cause, Context, Effect, Layer, PubSub, RcMap, Schema, Stream } from "effect"
+import { isRecord } from "@opencode/util/record"
+import { Cause, Context, Effect, FiberSet, Layer, PubSub, RcMap, Stream } from "effect"
 import { lazy } from "../util/lazy.js"
 import { watch } from "node:fs"
 import path from "path"
 import loadBinding from "./watcher-binding.js"
 
 const SUBSCRIBE_TIMEOUT_MS = 10_000
-export const Event = { Updated: FileSystem.Event.Changed }
 
 const watcher = lazy((): typeof ParcelWatcher | undefined => {
   try {
@@ -37,7 +36,7 @@ export type WatchInput =
   | { readonly path: string; readonly type: "entries"; readonly names: readonly string[] }
   | { readonly path: string; readonly type: "directory"; readonly ignore?: readonly string[] }
 
-export type Subscription = {
+type Subscription = {
   readonly unsubscribe: () => Promise<void>
   /** Backend name for logging, e.g. "node" or "fs-events". */
   readonly backend?: string
@@ -65,14 +64,13 @@ export interface Interface {
   readonly subscribe: (input: WatchInput, onReady?: Effect.Effect<void>) => Effect.Effect<Stream.Stream<Update>>
 }
 
-export const Options = Schema.Struct({
-  enabled: Schema.optional(Schema.Boolean),
-})
-export type Options = typeof Options.Type
+export interface Options {
+  readonly enabled?: boolean
+}
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Watcher") {}
 
-export interface TestInterface extends Interface {
+interface TestInterface extends Interface {
   /** Delivers one update to every active watch whose target covers `update.path`. */
   readonly emit: (update: Update) => Effect.Effect<void>
   /** Returns every subscribe call observed so far, in order. */
@@ -201,32 +199,47 @@ export const testLayer = Layer.effectContext(
   }),
 )
 
-export const nativeLayer = Layer.succeed(
+export const nativeLayer = Layer.effect(
   Native,
-  Native.of({
-    subscribe: (input) => {
-      if (input.type === "file" || input.type === "entries") {
-        return Effect.sync(() => {
+  Effect.gen(function* () {
+    // Native callbacks log through the layer's context, and their fibers end with it.
+    const runFork = yield* FiberSet.makeRuntime()
+    return Native.of({
+      subscribe: (input) => {
+        if (input.type === "file" || input.type === "entries") {
           const directory = input.type === "file" ? path.dirname(input.target) : input.target
           const names = new Set(input.type === "file" ? [path.basename(input.target)] : input.names)
-          const subscription = watch(directory, { recursive: false }, (_event, file) => {
-            if (file && !names.has(file)) return
-            for (const name of file ? [file] : names) {
-              input.publish({ path: path.join(directory, name), type: "update" })
-            }
-          })
-          subscription.on("error", (error: unknown) =>
-            Effect.runFork(Effect.logError("watcher callback failed", { path: directory, error })),
+          return Effect.try({
+            try: () =>
+              watch(directory, { recursive: false }, (_event, file) => {
+                if (file && !names.has(file)) return
+                for (const name of file ? [file] : names) {
+                  input.publish({ path: path.join(directory, name), type: "update" })
+                }
+              }),
+            catch: (error) => error,
+          }).pipe(
+            Effect.map((subscription): Subscription => {
+              subscription.on("error", (error: unknown) =>
+                runFork(Effect.logError("watcher callback failed", { path: directory, error })),
+              )
+              return { unsubscribe: () => Promise.resolve(subscription.close()), backend: "node" }
+            }),
+            // A missing directory (ENOENT) ends subscriber streams instead of crashing the watch.
+            Effect.catch((error) =>
+              isRecord(error) && error.code === "ENOENT"
+                ? Effect.undefined
+                : Effect.logError("failed to watch directory", { path: directory, error }).pipe(Effect.as(undefined)),
+            ),
           )
-          return { unsubscribe: () => Promise.resolve(subscription.close()), backend: "node" }
-        })
-      }
-      return subscribeDirectory(watcher(), getBackend(), input.target, input.ignore, input.publish)
-    },
+        }
+        return subscribeDirectory(watcher(), getBackend(), input.target, input.ignore, input.publish, runFork)
+      },
+    })
   }),
 )
 
-export const nativeNode = makeGlobalNode({ service: Native, layer: nativeLayer, deps: [] })
+const nativeNode = makeGlobalNode({ service: Native, layer: nativeLayer, deps: [] })
 
 export function configured(options?: Options) {
   return makeGlobalNode({ service: Service, layer: layer(options), deps: [nativeNode] })
@@ -240,6 +253,7 @@ function subscribeDirectory(
   directory: string,
   ignore: readonly string[],
   publish: (update: Update) => void,
+  runFork: (effect: Effect.Effect<void>) => unknown,
 ): Effect.Effect<Subscription | undefined> {
   if (!native || !backend) {
     return Effect.logError("watcher backend not supported", { directory, platform: process.platform }).pipe(
@@ -247,7 +261,7 @@ function subscribeDirectory(
     )
   }
   const callback: ParcelWatcher.SubscribeCallback = (error, updates) => {
-    if (error) Effect.runFork(Effect.logError("watcher callback failed", { error }))
+    if (error) runFork(Effect.logError("watcher callback failed", { error }))
     for (const update of updates) publish(update)
   }
   // Copy `ignore`: it aliases the RcMap key, whose structural hash is cached,

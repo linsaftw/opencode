@@ -2,27 +2,41 @@ import { describe, expect, test } from "bun:test"
 import type { Project } from "@/runtime/server/types"
 import type { SessionInfo } from "@opencode/client/promise"
 import { createRoot } from "solid-js"
-import { createServerSessionEntries } from "@/shell/commands/palette"
-import type { LocalProject } from "@/shell/state/layout"
+import {
+  createCommandPaletteCommandEntry,
+  createServerSessionEntries,
+  type CommandPaletteEntry,
+} from "@/shell/commands/palette"
+import { matchesCommandPaletteEntry } from "@/shell/commands/dialog"
 import { ServerConnection } from "@/runtime/server/registry"
 import { getProjectAvatarSource } from "@opencode/ui/project-avatar"
 
-const stored: Project = {
+const project: Project = {
   id: "project-1",
   name: "Palette project",
+  icon: { override: "home-project-avatar" },
   worktree: "/workspace/project",
+  worktrees: [],
   sandboxes: [],
-  time: { created: 1, updated: 1 },
+  time: { created: 1, updated: 1, active: 1 },
+}
+
+const other: Project = {
+  ...project,
+  id: "project-2",
+  name: "Other project",
+  icon: { url: "other-project-avatar" },
+  worktree: "/workspace/other",
 }
 
 const session: SessionInfo = {
   id: "session-1",
-  projectID: stored.id,
+  projectID: project.id,
   agent: "build",
   model: { id: "model-1", providerID: "provider-1" },
   cost: 0,
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  location: { directory: stored.worktree },
+  location: { directory: project.worktree },
   title: "Palette session",
   time: { created: 1, updated: 2 },
 }
@@ -30,12 +44,6 @@ const session: SessionInfo = {
 describe("command palette sessions", () => {
   test("uses the home project avatar and cancels superseded searches", async () => {
     const server = ServerConnection.Key.make("selected-server")
-
-    const opened: LocalProject = {
-      ...stored,
-      icon: { override: "home-project-avatar" },
-      expanded: true,
-    }
 
     const searches: string[] = []
     const gets: string[] = []
@@ -45,8 +53,7 @@ describe("command palette sessions", () => {
         createRoot((dispose) => {
           const search = createServerSessionEntries({
             server,
-            opened: () => [opened],
-            stored: () => [{ ...stored, icon: { url: "stored-project-avatar" } }],
+            projects: () => [other, project],
             load: async (text) => {
               searches.push(text)
 
@@ -61,6 +68,7 @@ describe("command palette sessions", () => {
             },
             untitled: () => "Untitled",
             category: () => "Sessions",
+            recentCategory: () => "Recent sessions",
           })
 
           const first = search("palette")
@@ -83,9 +91,43 @@ describe("command palette sessions", () => {
     expect(result[0]).toMatchObject({
       server,
       sessionID: session.id,
-      description: stored.name,
-      project: { id: stored.id, icon: opened.icon },
+      description: project.name,
+      project: { id: project.id, icon: project.icon },
     })
+  })
+
+  test("with includeArchived, typed searches list archived sessions marked archived and recent rows skip them", async () => {
+    const archived = {
+      ...session,
+      id: "archived-session",
+      title: "Palette archived",
+      time: { ...session.time, archived: 3 },
+    }
+
+    const [typed, recent] = await new Promise<[CommandPaletteEntry[], CommandPaletteEntry[]]>((resolve, reject) => {
+      createRoot((dispose) => {
+        const sessions = createServerSessionEntries({
+          server: ServerConnection.Key.make("selected-server"),
+          includeArchived: true,
+          projects: () => [project],
+          load: async () => ({ data: [session, archived] }),
+          get: async () => session,
+          untitled: () => "Untitled",
+          category: () => "Sessions",
+          recentCategory: () => "Recent sessions",
+        })
+
+        sessions("palette")
+          .then((entries) => resolve([entries, sessions.items("")]), reject)
+          .finally(dispose)
+      })
+    })
+
+    expect(typed.map((entry) => [entry.sessionID, entry.archived])).toEqual([
+      [session.id, undefined],
+      [archived.id, 3],
+    ])
+    expect(recent.map((entry) => entry.sessionID)).toEqual([session.id])
   })
 
   test("loads an exact session when the query looks like an ID", async () => {
@@ -97,8 +139,7 @@ describe("command palette sessions", () => {
         createRoot((dispose) => {
           const search = createServerSessionEntries({
             server: ServerConnection.Key.make("selected-server"),
-            opened: () => [],
-            stored: () => [stored],
+            projects: () => [project],
             load: async () => ({ data: [] }),
             get: async (sessionID) => {
               gets.push(sessionID)
@@ -107,6 +148,7 @@ describe("command palette sessions", () => {
             },
             untitled: () => "Untitled",
             category: () => "Sessions",
+            recentCategory: () => "Recent sessions",
           })
 
           search(exact.id).then(resolve, reject).finally(dispose)
@@ -116,5 +158,105 @@ describe("command palette sessions", () => {
 
     expect(gets).toEqual([exact.id])
     expect(result).toMatchObject([{ sessionID: exact.id, title: exact.title }])
+  })
+
+  test("the caller's abort cancels a search while it waits and while it fetches", async () => {
+    const signals: AbortSignal[] = []
+    const fetched = Promise.withResolvers<void>()
+
+    await createRoot(async (dispose) => {
+      try {
+        const sessions = createServerSessionEntries({
+          server: ServerConnection.Key.make("selected-server"),
+          projects: () => [project],
+          load: (_text, signal) => {
+            signals.push(signal)
+            fetched.resolve()
+
+            return new Promise(() => {})
+          },
+          get: async () => session,
+          untitled: () => "Untitled",
+          category: () => "Sessions",
+          recentCategory: () => "Recent sessions",
+        })
+
+        const waiting = new AbortController()
+        const first = sessions.search("palette", waiting.signal)
+        waiting.abort()
+        expect(await first).toEqual([])
+
+        const fetching = new AbortController()
+        const second = sessions.search("palette", fetching.signal)
+        await fetched.promise
+        fetching.abort()
+        expect(await second).toEqual([])
+        expect(signals).toHaveLength(1)
+        expect(signals[0]?.aborted).toBe(true)
+      } finally {
+        dispose()
+      }
+    })
+  })
+
+  test("matches known and loaded sessions synchronously while remote search is pending", async () => {
+    const server = ServerConnection.Key.make("selected-server")
+
+    const remote = {
+      ...session,
+      id: "session-2",
+      title: "Remote palette session",
+      time: { created: 2, updated: 4 },
+    }
+
+    await createRoot(async (dispose) => {
+      try {
+        const sessions = createServerSessionEntries({
+          server,
+          known: () => [session],
+          projects: () => [project],
+          load: async () => ({ data: [remote] }),
+          get: async () => session,
+          untitled: () => "Untitled",
+          category: () => "Session",
+          recentCategory: () => "Recent sessions",
+        })
+
+        expect(sessions.items("")).toMatchObject([
+          { sessionID: session.id, title: session.title, category: "Recent sessions" },
+        ])
+        expect(sessions.items("palette")).toMatchObject([
+          { sessionID: session.id, title: session.title, category: "Session" },
+        ])
+
+        await sessions.search("remote")
+        expect(sessions.items("palette")).toMatchObject([
+          { sessionID: remote.id, title: remote.title, category: "Session" },
+          { sessionID: session.id, title: session.title, category: "Session" },
+        ])
+      } finally {
+        dispose()
+      }
+    })
+  })
+})
+
+describe("command palette commands", () => {
+  test("match their keywords as well as their title", () => {
+    const entry = createCommandPaletteCommandEntry(
+      { id: "debug.toggle", title: "Toggle debug bar", keywords: "dev bar developer tools diagnostics" },
+      "View",
+    )
+
+    expect(matchesCommandPaletteEntry(entry, "dev bar")).toBe(true)
+    expect(matchesCommandPaletteEntry(entry, "Diagnostics")).toBe(true)
+    expect(matchesCommandPaletteEntry(entry, "terminal")).toBe(false)
+  })
+
+  test("match a session by its title, not by its group name, as the server does", () => {
+    const entry = { id: "session:tabs", type: "session" as const, title: "Fix tabs", category: "Session" }
+
+    expect(matchesCommandPaletteEntry(entry, "tabs")).toBe(true)
+    expect(matchesCommandPaletteEntry(entry, "session")).toBe(false)
   })
 })

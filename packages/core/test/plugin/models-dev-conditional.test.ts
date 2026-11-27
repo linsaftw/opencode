@@ -49,14 +49,14 @@ const it = testEffect(
   ]),
 )
 
-// Rewrites the stored entry with an old updatedAt, so the next periodic refresh is past the TTL.
-const age = (body: string, etag: string) =>
+// Rewrites the stored metadata with an old updatedAt, so the next periodic refresh is past the TTL.
+// Refresh reads the meta row first, so aging the catalog row alone would not reach it.
+const age = (etag: string) =>
   Effect.gen(function* () {
     const kv = yield* KV.Service
-    yield* kv.set(`models-dev:catalog:${Hash.fast(url)}`, {
+    yield* kv.set(`models-dev:v4:catalog:${Hash.fast(url)}:meta`, {
       updatedAt: Date.now() - 2 * 60 * 60 * 1000,
       etag,
-      body,
     })
   })
 
@@ -85,7 +85,7 @@ describe("ModelsDev conditional refresh", () => {
       const before = JSON.stringify(yield* svc.get())
       expect(before).toContain("Model v1")
 
-      yield* age(state.body, state.etag)
+      yield* age(state.etag)
       const count = seen.length
       yield* svc.refresh()
       expect(seen.length).toBe(count + 1)
@@ -94,7 +94,7 @@ describe("ModelsDev conditional refresh", () => {
 
       state.etag = '"v2"'
       state.body = catalog("Model v2")
-      yield* age(catalog("Model v1"), '"v1"')
+      yield* age('"v1"')
       yield* svc.refresh()
       expect(seen.at(-1)).toBe('"v1"')
       expect(JSON.stringify(yield* svc.get())).toContain("Model v2")

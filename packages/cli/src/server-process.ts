@@ -12,6 +12,7 @@ import { PersistentPty } from "@opencode/schema/persistent-pty"
 import { HttpServer } from "effect/http"
 import { NetAddress } from "effect/net"
 import { Env } from "./env"
+import { PortOwner } from "./services/port-owner"
 import { ServiceConfig } from "./services/service-config"
 import { RetainedImage } from "./services/retained-image"
 import { ServiceRegistration } from "./services/service-registration"
@@ -58,19 +59,25 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           ),
         )
   const global = yield* Global.Service
-  if (options.mode === "service") yield* Effect.sync(() => process.chdir(global.home))
+  // A sandbox may deny $HOME; the service then keeps the cwd it was launched from.
+  if (options.mode === "service")
+    yield* Effect.try(() => process.chdir(global.home)).pipe(
+      Effect.catch((cause) => Effect.logWarning("failed to change service directory to home", { cause })),
+    )
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const foreground = options.mode === "default"
-      const serviceOptions = options.mode === "service" ? yield* ServiceConfig.options() : undefined
+      const registrationFile = options.mode === "service" ? yield* ServiceConfig.registrationFile() : undefined
       const config = options.mode === "service" ? yield* ServiceConfig.read() : {}
       const hostname = options.hostname ?? config.hostname ?? "127.0.0.1"
       const port = options.port ?? config.port ?? (options.mode === "service" ? ServiceConfig.defaultPort() : undefined)
       const findIncumbent =
-        serviceOptions !== undefined && port !== undefined
-          ? Service.incumbent({ ...serviceOptions, url: serviceURL(hostname, port) })
+        registrationFile !== undefined && port !== undefined
+          ? Service.incumbent({ file: registrationFile, url: serviceURL(hostname, port) })
           : undefined
       if (findIncumbent !== undefined && (yield* findIncumbent) !== undefined) return
+      // Desktop can launch the service directly without injecting its saved environment.
+      Object.assign(process.env, ServiceConfig.processEnv(config.env))
       // Keep a package-manager or curl install replaceable while the service runs; Desktop updates its own copy.
       if (options.mode === "service" && process.platform === "win32" && RetainedImage.installed(global.home))
         yield* RetainedImage.retain(global.cache, "service")
@@ -117,13 +124,19 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
             project: !truthy(
               process.env.OPENCODE_CONFIG_PROJECT_DISABLE ?? process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
             ),
-            // .claude is only read for skills, so both flags gate the same roots.
+            // Config reads .claude only for skills; CLAUDE.md is gated under instructions.
             claude: !(
               truthy(process.env.OPENCODE_DISABLE_CLAUDE_CODE) ||
               truthy(process.env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS)
             ),
             file: process.env.OPENCODE_CONFIG,
             content: process.env.OPENCODE_CONFIG_CONTENT,
+          },
+          instructions: {
+            claude: !(
+              truthy(process.env.OPENCODE_DISABLE_CLAUDE_CODE) ||
+              truthy(process.env.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT)
+            ),
           },
           windows: {
             gitbash: process.env.OPENCODE_GIT_BASH_PATH,
@@ -136,7 +149,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
                 : !truthy(process.env.OPENCODE_DISABLE_FFF),
           },
         },
-        serviceOptions === undefined
+        registrationFile === undefined
           ? undefined
           : {
               onListen: (address, shutdown) =>
@@ -146,7 +159,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
                     address,
                     password,
                     id: instanceID,
-                    file: serviceOptions.file,
+                    file: registrationFile,
                     shutdown,
                   })
                 }),
@@ -168,9 +181,10 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
               const server = yield* launch.pipe(Effect.catchIf(addressInUse, () => Effect.void))
               if (server !== undefined) return server
             }
+            const owner = port === undefined ? undefined : yield* PortOwner.describe(port, hostname)
             return yield* Effect.fail(
               new Error(
-                `Managed service port ${port} on ${hostname} is already in use by another process. ` +
+                `Managed service port ${port} on ${hostname} is already in use by ${owner ?? "another process"}. ` +
                   "Configure another port with `opencode service set port <port>` and start the service again.",
                 { cause: error },
               ),
@@ -179,7 +193,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
         }),
       )
       if (server === undefined) return
-      if (serviceOptions !== undefined && config.remote !== undefined && NetAddress.isInetAddress(server.address)) {
+      if (registrationFile !== undefined && config.remote !== undefined && NetAddress.isInetAddress(server.address)) {
         const bound = NetAddress.formatIp(server.address.address)
         // A wildcard bind also listens on loopback, which is all the tunnel needs to reach.
         const target =

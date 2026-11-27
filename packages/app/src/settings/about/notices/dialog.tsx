@@ -1,6 +1,5 @@
 import { For, Show } from "solid-js"
 import { Dialog, DialogBody, DialogHeader, DialogTitleGroup } from "@opencode/ui/dialog"
-import { ScrollView } from "@opencode/ui/scroll-view"
 import { useLanguage } from "@/runtime/i18n/language"
 import { ExternalLink } from "@/runtime/platform/external-link"
 import { fonts } from "./fonts"
@@ -18,7 +17,7 @@ export default function DialogThirdPartyNotices() {
   const language = useLanguage()
 
   return (
-    <Dialog size="large">
+    <Dialog size="x-large">
       <DialogHeader>
         <DialogTitleGroup
           title={language.t("settings.about.notices.title")}
@@ -26,13 +25,15 @@ export default function DialogThirdPartyNotices() {
         />
       </DialogHeader>
       <DialogBody>
-        <ScrollView class="settings-notices-scroll">
+        <div class="settings-notices-scroll" data-scrollable>
           <div class="settings-notices">
             <For each={notices}>
               {(entry) => (
                 <section class="settings-notice">
                   <div class="settings-notice-heading">
-                    <ExternalLink href={entry.url}>{entry.name}</ExternalLink>
+                    <Show when={entry.url} fallback={entry.name}>
+                      {(url) => <ExternalLink href={url()}>{entry.name}</ExternalLink>}
+                    </Show>
                     <span>{entry.license}</span>
                   </div>
                   <p>{entry.detailKey ? language.t(entry.detailKey) : entry.detail}</p>
@@ -107,7 +108,7 @@ export default function DialogThirdPartyNotices() {
               </For>
             </section>
           </div>
-        </ScrollView>
+        </div>
       </DialogBody>
     </Dialog>
   )

@@ -61,8 +61,6 @@ const setup = Effect.gen(function* () {
     sessionID,
     reason: "manual",
     text: "local summary",
-    recent: "",
-    providerContext: undefined,
   })
   const rows = database.db
     .select()

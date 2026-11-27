@@ -1,5 +1,5 @@
 import { createMemo, createSignal } from "solid-js"
-import { useConfig } from "../config"
+import { useConfig, useNewDesigns } from "../config"
 import { DIALOG_LIST_INSET } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useTheme } from "../context/theme"
@@ -9,21 +9,42 @@ type Experiment = {
   id: string
   title: string
   description: string
+  /** Whether the experiment is on when the config does not set it. */
+  default?: boolean
 }
 
 // In-flight features anyone can opt into. Each entry is temporary: an
 // experiment either graduates (delete the entry, make the behavior
 // unconditional) or dies (delete the entry and the branch it gated).
-export const experiments: Experiment[] = []
+export const experiments: Experiment[] = [
+  {
+    id: "new-designs",
+    title: "New designs",
+    description: "Preview the new TUI designs",
+    default: true,
+  },
+  {
+    id: "client-mcp",
+    title: "TUI tools",
+    description: "Let the agent open terminals in this TUI (requires server support)",
+  },
+  {
+    id: "session-find",
+    title: "Find in session",
+    description: "Search the open session's messages with /find or <leader>f",
+  },
+]
 
 export function DialogExperiments() {
   const config = useConfig()
+  const newDesigns = useNewDesigns()
   const theme = useTheme()
   const toast = useToast()
   const [selected, setSelected] = createSignal<Experiment>()
   const [saving, setSaving] = createSignal(false)
 
-  const enabled = (experiment: Experiment) => config.data.experimental?.[experiment.id] === true
+  const enabled = (experiment: Experiment) =>
+    (config.data.experimental?.[experiment.id] ?? experiment.default ?? false) === true
 
   const options = createMemo(() =>
     experiments.map((experiment) => ({
@@ -61,7 +82,7 @@ export function DialogExperiments() {
           <text fg={theme.text.muted}>No experiments available</text>
         </box>
       }
-      footerHints={experiments.length > 0 ? [{ title: "change", label: "←/→" }] : []}
+      footerHints={experiments.length > 0 && !newDesigns() ? [{ title: "change", label: "←/→" }] : []}
       bindings={
         experiments.length > 0
           ? [

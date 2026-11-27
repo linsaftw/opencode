@@ -1,18 +1,22 @@
 import { define } from "@opencode/plugin/effect/plugin"
+import { Event } from "@opencode/schema/config"
 import { Integration } from "@opencode/schema/integration"
 import { Provider } from "@opencode/schema/provider"
 import { Effect, Stream } from "effect"
 import { Bus } from "../bus.js"
+import { Config } from "../config.js"
+import { Flag } from "../flag.js"
 import { Model } from "../model.js"
 import { ModelsDev } from "../models-dev.js"
 
 // These catalog entries require inference profiles on Bedrock Runtime.
-// Opus/Sonnet 4.6 support in-region calls in eu-west-2 and must remain available.
+// Opus/Sonnet 4.6 and Opus 5.5 support in-region calls in eu-west-2 and must remain available.
 const BEDROCK_PROFILE_ONLY_IDS = [
   "amazon.nova-2-lite-v1:0",
   "anthropic.claude-fable-5",
   "anthropic.claude-fable-5-1",
   "anthropic.claude-haiku-4-5-20251001-v1:0",
+  "anthropic.claude-haiku-5-5",
   "anthropic.claude-opus-4-1-20250805-v1:0",
   "anthropic.claude-opus-4-5-20251101-v1:0",
   "anthropic.claude-opus-4-7",
@@ -20,8 +24,13 @@ const BEDROCK_PROFILE_ONLY_IDS = [
   "anthropic.claude-opus-5",
   "anthropic.claude-sonnet-4-5-20250929-v1:0",
   "anthropic.claude-sonnet-5",
+  "anthropic.claude-sonnet-5-5",
   "deepseek.r1-v1:0",
+  "meta.llama4-maverick-17b-instruct-v1:0",
+  "meta.llama4-scout-17b-instruct-v1:0",
   "mistral.pixtral-large-2502-v1:0",
+  "writer.palmyra-x4-v1:0",
+  "writer.palmyra-x5-v1:0",
 ]
 
 export const ModelsDevPlugin = define({
@@ -29,9 +38,14 @@ export const ModelsDevPlugin = define({
   effect: Effect.fn(function* (ctx) {
     const modelsDev = yield* ModelsDev.Service
     const bus = yield* Bus.Service
+    const config = yield* Config.Service
+    const flags = yield* Flag.Service
+    const get = Effect.flatMap(config.entries(), (entries) =>
+      modelsDev.get(flags.resolve(entries).recommended_api.enabled),
+    )
     // Filtering and definition indexes are shared across Locations. Only Model materialization
     // makes mutable copies, after provider configuration and access have been resolved.
-    const loaded = { data: snapshots(yield* modelsDev.get()) }
+    const loaded = { data: snapshots(yield* get) }
     yield* ctx.integration.transform((integrations) => {
       for (const provider of loaded.data) {
         if (provider.environment.length === 0) continue
@@ -60,18 +74,19 @@ export const ModelsDevPlugin = define({
       }
     })
     const apply = (data: readonly ModelsDev.Snapshot[]) => {
-      loaded.data = snapshots(data)
+      const latest = snapshots(data)
+      if (latest === loaded.data) return Effect.void
+      loaded.data = latest
       return ctx.integration.reload().pipe(Effect.andThen(ctx.provider.reload()))
     }
-    yield* bus.subscribe(ModelsDev.Event.Refreshed).pipe(
-      Stream.runForEach(() => modelsDev.get().pipe(Effect.flatMap(apply))),
+    yield* bus.subscribe([ModelsDev.Event.Refreshed, Event.Updated]).pipe(
+      Stream.runForEach(() => get.pipe(Effect.flatMap(apply))),
       Effect.forkScoped({ startImmediately: true }),
     )
     // A refresh that landed between the initial read and the subscription above published
     // Refreshed to nobody here. On a cold cache that read served the bundled snapshot, so
     // re-read now instead of waiting for the next TTL refresh.
-    const latest = yield* modelsDev.get()
-    if (snapshots(latest) !== loaded.data) yield* apply(latest)
+    yield* get.pipe(Effect.flatMap(apply))
   }),
 })
 
@@ -90,7 +105,8 @@ function snapshots(data: readonly ModelsDev.Snapshot[]) {
       models: provider.models.filter(
         (model) =>
           model.status !== "deprecated" &&
-          Model.supportsText(model) &&
+          // Non-chat models are kept for lookups; the Model service never offers them for sessions.
+          ((model.type ?? "chat") !== "chat" || Model.supportsText(model)) &&
           !(
             provider.info.id === Provider.ID.amazonBedrock &&
             BEDROCK_PROFILE_ONLY_IDS.includes(model.modelID ?? model.id)

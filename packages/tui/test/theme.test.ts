@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { TerminalColors } from "@opentui/core"
-import { allThemes, hasTheme, getOpenCodeTheme, parseTheme, resolveTheme } from "../src/theme"
+import { allThemes, hasTheme, getOpenCodeClassicTheme, getOpenCodeTheme, parseTheme, resolveTheme } from "../src/theme"
 import { discoverThemes } from "../src/theme/discovery"
 import { configDirectories } from "../src/util/config-directories"
 import { terminalMode } from "../src/theme/system"
@@ -19,7 +19,12 @@ test("rejects unrecognized theme structures", () => {
 
 test("registers opencode as a native V2 theme", () => {
   expect(allThemes().opencode).toBe(getOpenCodeTheme())
-  expect(parseTheme(getOpenCodeTheme()).base).toBeDefined()
+  expect(parseTheme(getOpenCodeClassicTheme()).base).toBeDefined()
+})
+
+test("keeps the experimental opencode2 theme out of the global theme list", () => {
+  expect(allThemes().opencode2).toBeUndefined()
+  expect(hasTheme("opencode2")).toBe(false)
 })
 
 test("detects V1 themes from their theme field and caches migrations", () => {
@@ -36,8 +41,8 @@ test("detects V1 themes from their theme field and caches migrations", () => {
 
 test("decodes native V2 themes lazily once", () => {
   const source = {
-    base: getOpenCodeTheme().base,
-    light: { ...getOpenCodeTheme().light, categorical: ["red"] },
+    base: getOpenCodeClassicTheme().base,
+    light: { ...getOpenCodeClassicTheme().light, categorical: ["red"] },
   } as const
 
   const document = parseTheme(source)

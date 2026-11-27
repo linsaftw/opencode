@@ -42,7 +42,7 @@ describe("local provider discovery backoff", () => {
       Effect.gen(function* () {
         const { server, state } = yield* origin
         const plugin = yield* Plugin.Service
-        const host = yield* PluginHost.make(plugin)
+        const host = yield* PluginHost.make(plugin, "test")
         yield* make(`http://127.0.0.1:${server.port}`, "30 seconds").effect(host)
         yield* TestClock.withLive(Effect.sleep("50 millis"))
         expect(state.probes).toBe(1)

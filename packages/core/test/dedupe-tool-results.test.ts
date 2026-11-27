@@ -6,7 +6,7 @@ const big = "x".repeat(2048) + "A"
 const other = "x".repeat(2048) + "B"
 
 const tool = (id: string, name: string, value: string) =>
-  new Message({
+  Message.make({
     role: "tool",
     content: [{ type: "tool-result", id, name, result: { type: "text", value } }],
   })

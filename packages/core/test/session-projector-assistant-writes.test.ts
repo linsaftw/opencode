@@ -18,7 +18,7 @@ import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionStore } from "@opencode/core/session/store"
 import { Session } from "@opencode/core/session"
-import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
+import { SessionMessageTable, SessionPartTable, SessionTable } from "@opencode/core/session/sql"
 import { Money } from "@opencode/schema/money"
 import { testEffect } from "./lib/effect"
 
@@ -62,6 +62,13 @@ describe("SessionProjector assistant writes", () => {
       yield* db.run(
         sql`create temp trigger count_update after update on session_message begin insert into write_log values (1); end`,
       )
+      // Part rows are where assistant content is written, so their inserts and updates count as writes too.
+      yield* db.run(
+        sql`create temp trigger count_part_insert after insert on session_part begin insert into write_log values (1); end`,
+      )
+      yield* db.run(
+        sql`create temp trigger count_part_update after update on session_part begin insert into write_log values (1); end`,
+      )
       const bus = yield* Bus.Service
       const writes = () => db.all<{ n: number }>(sql`select count(*) as n from write_log`).pipe(Effect.orDie)
       const usage = { input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 1 } }
@@ -88,7 +95,7 @@ describe("SessionProjector assistant writes", () => {
         () => bus.publish(SessionEvent.Step.Ended, { sessionID, assistantMessageID: message, finish: "stop", cost: Money.USD.make(1.25), tokens: usage }),
         () => bus.publish(SessionEvent.Execution.Succeeded, { sessionID }),
       ]
-      // Expected UPDATEs per event with the optimized projector. The unmatched
+      // Expected writes (message updates plus part inserts and updates) per event. The unmatched
       // tool.input.ended for an unknown call (index 15) must not rewrite the row.
       const expectedWrites = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0]
       const observed: number[] = []
@@ -105,9 +112,29 @@ describe("SessionProjector assistant writes", () => {
         .orderBy(asc(SessionMessageTable.seq))
         .all()
         .pipe(Effect.orDie)
-      // time_updated is wall-clock touch noise and idle IDs derive from random event IDs; all other bytes are compared.
+      // Assistant parts live in session_part rows; fold them back into `content` so the golden keeps the
+      // message's full stored shape. time_updated is wall-clock touch noise and idle IDs derive from random event IDs.
+      const parts = yield* db
+        .select()
+        .from(SessionPartTable)
+        .where(eq(SessionPartTable.session_id, sessionID))
+        .orderBy(asc(SessionPartTable.ordinal))
+        .all()
+        .pipe(Effect.orDie)
       const actual = JSON.stringify(
-        rows.map((row) => ({ ...row, id: row.type === "idle" ? "idle" : row.id, time_updated: 0 })),
+        rows.map((row) => ({
+          ...row,
+          ...(row.type === "assistant"
+            ? {
+                data: {
+                  ...row.data,
+                  content: parts.filter((part) => part.message_id === row.id).map((part) => part.data),
+                },
+              }
+            : {}),
+          id: row.type === "idle" ? "idle" : row.id,
+          time_updated: 0,
+        })),
       )
       if (process.env.UPDATE_GOLDEN === "1") yield* Effect.promise(() => Bun.write(golden, actual))
       expect(actual).toBe(yield* Effect.promise(() => Bun.file(golden).text()))

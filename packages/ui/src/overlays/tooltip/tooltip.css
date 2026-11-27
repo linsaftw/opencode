@@ -12,8 +12,8 @@
   display: inline-flex;
   flex-direction: row;
   align-items: center;
-  padding: 5px 6px;
-  gap: 6px;
+  padding: 4px 6px;
+  gap: 4px;
 
   background: var(--v2-background-bg-layer-01);
   box-shadow: var(--v2-elevation-floating);
@@ -22,7 +22,7 @@
   font-style: normal;
   font-weight: 530;
   font-size: 11px;
-  line-height: 12px;
+  line-height: var(--line-height-compact);
   letter-spacing: 0.05px;
   color: var(--v2-text-text-base);
   font-variant-numeric: tabular-nums;
@@ -39,11 +39,36 @@
   }
 }
 
+[data-component="tooltip-v2"]:has(> [data-component="keybind-v2"]) {
+  gap: 6px;
+  padding-right: 5px;
+}
+
+[data-component="tooltip-v2-text"] {
+  color: var(--v2-text-text-base);
+
+  &[data-variant="muted"] {
+    color: var(--v2-text-text-muted);
+  }
+
+  &[data-variant="faint"] {
+    color: var(--v2-text-text-faint);
+  }
+
+  &[data-variant="accent"] {
+    color: var(--v2-text-text-accent);
+  }
+
+  &[data-variant="warning"] {
+    color: var(--v2-state-fg-warning);
+  }
+}
+
 [data-component="tooltip-v2"][data-appearance="standard"] {
   display: block;
   max-width: 320px;
   padding: 2px 8px;
-  border: 1px solid var(--border-weak-base, rgba(0, 0, 0, 0.07));
+  border: 1px solid var(--v2-border-border-muted);
   border-radius: var(--radius-sm);
   background: var(--surface-float-base);
   color: var(--text-invert-strong);
@@ -94,7 +119,7 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
+:root[data-motion="reduce"] {
   [data-component="tooltip-v2"],
   [data-component="tooltip-v2"][data-closed] {
     animation: none;

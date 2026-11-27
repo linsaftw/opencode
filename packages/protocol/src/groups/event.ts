@@ -1,3 +1,4 @@
+import { Space } from "@opencode/schema/space"
 import { Event } from "@opencode/schema/event"
 import { EventManifest } from "@opencode/schema/event-manifest"
 import { Location } from "@opencode/schema/location"
@@ -23,6 +24,8 @@ const rpcEvent = Schema.Struct({
 const schema = <const Definitions extends ReadonlyArray<Definition>>(definitions: Definitions) =>
   Schema.Union([
     ...definitions,
+    // Sent only by the event feed to streams subscribed to their space, never on the bus, so plugins do not see them.
+    ...Space.Event.Definitions,
     rpcEvent,
     ...(definitions.some((definition) => definition.type === "server.connected")
       ? []
@@ -30,10 +33,32 @@ const schema = <const Definitions extends ReadonlyArray<Definition>>(definitions
           Schema.Struct({
             ...fields,
             type: Schema.Literal("server.connected"),
-            data: Schema.Struct({}),
+            data: Schema.Struct({
+              // Optional for clients and fixtures that predate it; the server always sends it.
+              stream: Schema.optional(Schema.String).annotate({
+                description: "This stream's random ID, which addresses it, e.g. in experimental.space.subscribe.",
+              }),
+            }),
           }).annotate({ identifier: "V2Event.server.connected" }),
         ]),
   ]).annotate({ identifier: "V2Event" })
+
+const query = <const Definitions extends ReadonlyArray<Definition>>(definitions: Definitions) =>
+  Schema.Struct({
+    types: Schema.optional(
+      Schema.ArrayEnsure(
+        Schema.Union([
+          Schema.Literals(
+            definitions.map((definition) => definition.type) as ReadonlyArray<Definitions[number]["type"]>,
+          ),
+          rpcEvent.fields.type,
+        ]),
+      ),
+    ).annotate({
+      description:
+        "Only send events of these types, plus the initial server.connected event. When omitted, all events are sent.",
+    }),
+  }).annotate({ identifier: "EventSubscribeQuery" })
 
 const make = <const Definitions extends ReadonlyArray<Definition>>(definitions: Definitions) => {
   const EventSchema = schema(definitions)
@@ -42,6 +67,7 @@ const make = <const Definitions extends ReadonlyArray<Definition>>(definitions: 
     group: HttpApiGroup.make("server.event")
       .add(
         HttpApiEndpoint.get("event.subscribe", "/api/event", {
+          query: query(definitions),
           success: HttpApiSchema.StreamSse({ data: EventSchema }),
         }).annotateMerge(
           OpenApi.annotations({
