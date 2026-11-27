@@ -33,6 +33,20 @@ type MessageEvent = Exclude<
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Info)
 const encodeMessage = Schema.encodeSync(SessionMessage.Info)
+const encodeContent = Schema.encodeSync(SessionMessage.AssistantContent)
+// Decoded assistant part -> the stored JSON it was decoded from. Immer keeps untouched parts by reference,
+// so a rewrite re-encodes only the parts an event changed.
+const storedContent = new WeakMap<object, unknown>()
+
+function encodeStored(message: SessionMessage.Info) {
+  if (message.type !== "assistant") return encodeMessage(message)
+  const encoded = encodeMessage({ ...message, content: [] })
+  // Spreading over `encoded` keeps the `content` key at its schema position, so the JSON bytes do not change.
+  return {
+    ...encoded,
+    content: message.content.map((part) => storedContent.get(part) ?? encodeContent(part)),
+  }
+}
 
 export class SessionAlreadyProjected extends Error {}
 
@@ -236,10 +250,16 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
 
 function run(db: DatabaseService, event: MessageEvent) {
   return Effect.gen(function* () {
-    const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
-      decodeMessage({ ...row.data, id: row.id, type: row.type })
+    const decodeRow = (row: typeof SessionMessageTable.$inferSelect) => {
+      const message = decodeMessage({ ...row.data, id: row.id, type: row.type })
+      if (message.type === "assistant") {
+        const stored = (row.data as unknown as { content: unknown[] }).content
+        message.content.forEach((part, index) => storedContent.set(part, stored[index]))
+      }
+      return message
+    }
     const updateMessage = (message: SessionMessage.Info) => {
-      const encoded = encodeMessage(message)
+      const encoded = encodeStored(message)
       const { id, type, ...data } = encoded
       return db
         .update(SessionMessageTable)

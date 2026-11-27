@@ -47,7 +47,9 @@ export function update(adapter: Adapter, event: SessionEvent.DurableEvent) {
     Effect.gen(function* () {
       const assistant = yield* adapter.getAssistant(messageID)
       if (!assistant) return
-      yield* adapter.updateAssistant(produce(assistant, recipe))
+      const next = produce(assistant, recipe)
+      // Immer keeps the reference when the recipe changed nothing; the stored row already matches.
+      if (next !== assistant) yield* adapter.updateAssistant(next)
     })
 
   const clearCurrentRetry = Effect.gen(function* () {
