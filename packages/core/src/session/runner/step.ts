@@ -139,11 +139,11 @@ export const make = Effect.gen(function* () {
       Stream.withSpan("LLM.stream", { attributes: modelAttributes }),
       Stream.runForEach((event) =>
         Effect.gen(function* () {
-          if (publisher.record().providerFailed) return
+          if (publisher.providerFailed()) return
           // Wait here, where cancellation still works, rather than inside the uninterruptible publish.
           if (!publisher.hasStarted()) yield* Fiber.join(pendingStartSnapshot)
           yield* publisher.publish(event)
-          if (firstOutputAt === undefined && publisher.record().outputStarted)
+          if (firstOutputAt === undefined && publisher.outputStarted())
             firstOutputAt = yield* Clock.currentTimeMillis
           if (event.type !== "tool-call" || event.providerExecuted) return
           const cancel = makeCancel()

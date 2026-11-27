@@ -4,7 +4,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import path from "path"
 import { isDeepStrictEqual } from "node:util"
 import { applyEdits, modify, type ParseError, parse } from "jsonc-parser"
-import { Context, Effect, FiberMap, Layer, Option, PubSub, Ref, Schema, Semaphore, Stream } from "effect"
+import { Context, Effect, FiberMap, Layer, Metric, Option, PubSub, Ref, Schema, Semaphore, Stream } from "effect"
 import { Directory, Document, Info, type Patch, type Entry, Event } from "@opencode/schema/config"
 import { App } from "./app.js"
 import { Credential } from "./credential.js"
@@ -58,6 +58,11 @@ export interface Interface {
     document: ConfigIntegration.Document | undefined,
   ) => Effect.Effect<void>
 }
+
+// Full discovery + load passes; the well-known fallback reload contributes here every interval.
+export const reloadCount = Metric.counter("opencode_config_reload_total", {
+  description: "Full config discovery and load passes",
+})
 
 export const Options = Schema.Struct({
   project: Schema.optional(Schema.Boolean),
@@ -444,6 +449,7 @@ export const layer = (options?: Options) =>
 
       const reload = Effect.fn("Config.reload")(
         function* () {
+          yield* Metric.update(reloadCount, 1)
           const next = yield* load(yield* ConfigDiscovery.discover(options))
           isInput = next.isInput
           yield* reconcile(next.sources)

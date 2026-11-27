@@ -13,7 +13,7 @@ bun install --frozen-lockfile
 echo '== regression suite =='
 (cd packages/core && bun test test/token-economy.test.ts && bun run typecheck)
 echo "== build this host target (version $SOURCE_VERSION, local channel) =="
-OPENCODE_VERSION="$SOURCE_VERSION" OPENCODE_CHANNEL=local bun run --cwd packages/cli build --single
+OPENCODE_VERSION="$SOURCE_VERSION" OPENCODE_CHANNEL=latest bun run --cwd packages/cli build --single
 TARGET="$(find "$ROOT/packages/cli/dist" -type f -path '*/bin/opencode' -print -quit)"
 if [[ -z "$TARGET" || ! -x "$TARGET" ]]; then echo 'Build did not produce an executable' >&2; exit 1; fi
 BUILT_VERSION="$("$TARGET" --version | sed "s/^opencode v//")"

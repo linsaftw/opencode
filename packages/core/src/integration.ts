@@ -10,8 +10,9 @@ import {
   Equal,
   Exit,
   Fiber,
+  Latch,
   Layer,
-  Schedule,
+  Metric,
   Schema,
   Scope,
   Stream,
@@ -265,6 +266,10 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/In
 const attemptLifetime = Duration.toMillis(Duration.minutes(10))
 const terminalRetention = Duration.toMillis(Duration.minutes(1))
 const scrubInterval = Duration.seconds(30)
+// Counts wakeups of the shared scrub fiber; idle integrations wake it zero times.
+export const scrubWakeups = Metric.counter("opencode_integration_scrub_wakeups_total", {
+  description: "Wakeups of the integration attempt scrubber",
+})
 
 type AttemptTime = { created: number; expires: number }
 type PendingAttempt = {
@@ -309,6 +314,8 @@ const layer = Layer.effect(
     const scope = yield* Scope.Scope
     const attempts = SynchronizedRef.makeUnsafe(new Map<AttemptID, AttemptEntry>())
     const commandAttempts = SynchronizedRef.makeUnsafe(new Map<AttemptID, CommandAttemptEntry>())
+    // Closed while no attempt is tracked, so the scrubber sleeps instead of polling empty maps.
+    const scrubLatch = Latch.makeUnsafe(false)
     // Runtime-only: statuses describe the current process's view of a connection and are not persisted.
     const statuses = new Map<string, IntegrationConnection.Status>()
     const statusKey = (integrationID: ID, connection: IntegrationConnection.Info) =>
@@ -551,17 +558,27 @@ const layer = Layer.effect(
       yield* Scope.close(attempt.scope, Exit.void)
     })
 
-    yield* scrub(attempts, (attemptID, attempt) =>
-      Effect.logInfo("integration oauth attempt closed", {
-        integrationID: attempt.integrationID,
-        attemptID,
-        reason: "expired",
-      }).pipe(Effect.andThen(close(attempt.scope))),
-    ).pipe(Effect.repeat(Schedule.spaced(scrubInterval)), Effect.forkIn(scope))
-    yield* scrub(commandAttempts, (_, attempt) => close(attempt.scope)).pipe(
-      Effect.repeat(Schedule.spaced(scrubInterval)),
-      Effect.forkIn(scope),
-    )
+    const tracked = Effect.gen(function* () {
+      const oauth = yield* SynchronizedRef.get(attempts)
+      const command = yield* SynchronizedRef.get(commandAttempts)
+      return oauth.size + command.size > 0
+    })
+    const scrubAll = Effect.gen(function* () {
+      yield* Metric.update(scrubWakeups, 1)
+      yield* scrub(attempts, (attemptID, attempt) =>
+        Effect.logInfo("integration oauth attempt closed", {
+          integrationID: attempt.integrationID,
+          attemptID,
+          reason: "expired",
+        }).pipe(Effect.andThen(close(attempt.scope))),
+      )
+      yield* scrub(commandAttempts, (_, attempt) => close(attempt.scope))
+      if (yield* tracked) return yield* Effect.sleep(scrubInterval)
+      yield* Latch.close(scrubLatch)
+      // An attempt inserted between the check and the close must reopen the latch.
+      if (yield* tracked) yield* Latch.open(scrubLatch)
+    })
+    yield* Effect.forever(Latch.whenOpen(scrubLatch, scrubAll)).pipe(Effect.forkIn(scope))
 
     const connectOAuth = Effect.fn("Integration.oauth.connect")(function* (input: {
       readonly integrationID: ID
@@ -597,6 +614,7 @@ const layer = Layer.effect(
           time,
         }),
       )
+      yield* Latch.open(scrubLatch)
       if (authorization.mode === "auto") {
         yield* authorization.callback.pipe(
           Effect.exit,
@@ -641,6 +659,7 @@ const layer = Layer.effect(
           time,
         }),
       )
+      yield* Latch.open(scrubLatch)
 
       yield* Effect.gen(function* () {
         const handle = yield* processes.spawn(

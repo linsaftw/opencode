@@ -611,6 +611,9 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     failUnsettledTools,
     failIncompleteTools,
     hasStarted: () => stepStarted,
+    // Per-event reads; `record()` allocates and scans tools, so hot paths use these instead.
+    providerFailed: () => providerFailed,
+    outputStarted: () => outputStarted,
     /** Immutable snapshot of everything recorded for this step so far. */
     record: (): StepRecord => ({
       outputStarted,

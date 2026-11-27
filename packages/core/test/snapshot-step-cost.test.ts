@@ -2,7 +2,7 @@ import { $ } from "bun"
 import { describe, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Effect, Layer } from "effect"
+import { Context, Effect, Layer } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Global } from "@opencode/util/global"
 import { Location } from "@opencode/core/location"
@@ -42,6 +42,14 @@ describe("Snapshot step cost probes", () => {
     ["fresh.txt"],
   )
 
+  scenario(
+    "tracked file deleted during the step",
+    async (dir) => {
+      await fs.rm(path.join(dir, "tracked.txt"))
+    },
+    ["tracked.txt"],
+  )
+
   testEffect(Layer.empty).live("counts git invocations for a no-op step and a single edit", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -78,9 +86,56 @@ describe("Snapshot step cost probes", () => {
   )
 })
 
+// Production shape: one Snapshot service serves both captures of a step, so its Git cache is warm and boot probes
+// are paid once. The counts exclude that boot and the first capture, which discovers the store.
+describe("Snapshot step cost, shared service", () => {
+  testEffect(Layer.empty).live("counts git invocations per step with one warm service", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const project = path.join(tmp.path, "project")
+            yield* Effect.promise(() => setup(project))
+            const scope = yield* Effect.scope
+            const context = yield* Layer.buildWithScope(layer(path.join(tmp.path, "warm"), project), scope)
+            const snapshot = Context.get(context, Snapshot.Service)
+            const trace = path.join(tmp.path, "git-trace.log")
+            const previous = process.env.GIT_TRACE
+            process.env.GIT_TRACE = trace
+            try {
+              yield* snapshot.capture()
+              yield* Effect.promise(() => fs.rm(trace, { force: true }))
+              const start = yield* snapshot.capture()
+              const end = yield* snapshot.capture()
+              expect(end).toBe(start)
+              const noop = yield* Effect.promise(() => countGit(trace))
+              yield* Effect.promise(() => fs.writeFile(path.join(project, "tracked.txt"), "edit\n"))
+              yield* Effect.promise(() => fs.rm(trace, { force: true }))
+              yield* snapshot.capture()
+              yield* snapshot.capture()
+              const edit = yield* Effect.promise(() => countGit(trace))
+              console.log(`git invocations, shared service: no-op step=${noop} edit step=${edit}`)
+              expect(noop).toBeLessThanOrEqual(SHARED_NOOP_STEP_MAX)
+              expect(edit).toBeLessThanOrEqual(SHARED_EDIT_STEP_MAX)
+            } finally {
+              if (previous === undefined) delete process.env.GIT_TRACE
+              else process.env.GIT_TRACE = previous
+            }
+          }),
+        ),
+      (tmp) => Effect.promise(() => fs.rm(tmp.path, { recursive: true, force: true })),
+    ),
+    { timeout: 60_000 },
+  )
+})
+
 // Measured on the current implementation: a no-op step (two captures) and a step with one edit.
 const GIT_NOOP_STEP_MAX = 14
 const GIT_EDIT_STEP_MAX = 16
+// Set to the measured shared-service counts; a rise means a new git process per capture was added.
+const SHARED_NOOP_STEP_MAX = 4
+const SHARED_EDIT_STEP_MAX = 7
 
 // Regression: a same-size edit within the same second as the previous stat record. Before the seed-copy fix, the
 // cold store (seeded from the project index) missed the edit about 1 in 8 runs. Each iteration uses a fresh repo.
