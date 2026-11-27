@@ -22,3 +22,12 @@
   attemptCapture / withTemporaryIndex / lastCaptures fingerprint reuse. Measured git calls per step:
   14 (no-op, two captures), 16 (edit). Fix the race first, then a safe end-capture skip is possible.
 - Queued: idle-polling items (models.dev ETag, per-location config reload, local provider backoff).
+
+## 2026-11-27 batch 2 (idle polling; probes: models-dev-conditional, provider-local-backoff, provider-opencode)
+- Landed: models.dev refresh hourly with ETag/304; Console re-check 15 min; local provider probes back off to 5 min
+  (<=14 probes/h vs 120); service registration poll 30 s.
+- OPEN UNITS (reverted for lack of a cheap probe, re-land with an observable counter):
+  per-location config wellknown loop doing a full reload() when unchanged (config.ts ~L361-378);
+  integration.ts 30 s scrub loops that wake with empty maps (arm one timer to earliest expiry).
+  Add a test-only counter or event hook, then re-apply. Also still open: SSE heartbeat per client,
+  recursive watchers without ignore (config/plugin/skill.ts, plugin/module.ts), 1-min sweeps.

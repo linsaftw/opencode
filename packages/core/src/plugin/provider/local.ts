@@ -1,6 +1,6 @@
 import { define } from "@opencode/plugin/effect/plugin"
 import type { Entry } from "@opencode/schema/config"
-import { Duration, Effect, Option, Schedule, type Schema, Semaphore, Stream } from "effect"
+import { Clock, Duration, Effect, Option, type Schema, Semaphore, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { shellParserWasm } from "#shell-parser-wasm"
 import { Config } from "../../config.js"
@@ -21,6 +21,8 @@ export type LocalModel = {
 }
 
 export type LocalDiscoveryClient = ReturnType<typeof createClient>
+
+const MAX_BACKOFF = Duration.minutes(5)
 
 export function createLocalProviderPlugin<Discovered>(input: {
   readonly id: string
@@ -95,20 +97,18 @@ export function createLocalProviderPlugin<Discovered>(input: {
           if (!current.endpoint) return undefined
           return yield* discoveryLock.withPermit(
             Effect.gen(function* () {
+              // Clock, not Date.now, so the cache TTL follows the same time source as the backoff schedule.
+              const now = yield* Clock.currentTimeMillis
               const cached = discovery.get(current.root)
-              if (
-                cached &&
-                cached.apiKey === current.apiKey &&
-                Date.now() - cached.checked < Duration.toMillis(interval)
-              )
+              if (cached && cached.apiKey === current.apiKey && now - cached.checked < Duration.toMillis(interval))
                 return { source: current, models: cached.models }
               discovery.set(current.root, {
-                checked: Date.now(),
+                checked: now,
                 apiKey: current.apiKey,
                 models: cached && cached.apiKey === current.apiKey ? cached.models : undefined,
               })
               const models = yield* input.discover(createClient(http, current.root, current.apiKey, current.endpoint))
-              discovery.set(current.root, { checked: Date.now(), apiKey: current.apiKey, models })
+              discovery.set(current.root, { checked: now, apiKey: current.apiKey, models })
               return { source: current, models }
             }),
           )
@@ -126,7 +126,28 @@ export function createLocalProviderPlugin<Discovered>(input: {
         })
 
         // Keep the last successful inventory through transient outages instead of flickering model availability.
-        yield* refresh().pipe(Effect.ignore, Effect.repeat(Schedule.spaced(interval)), Effect.forkScoped)
+        // A failing origin (typically connection refused on localhost) backs off from `interval` toward
+        // MAX_BACKOFF; any successful listing or a config change resets it.
+        const backoff = { failures: 0 }
+        const probe = Effect.fn("LocalProviderPlugin.probe")(function* () {
+          const ok = yield* refresh().pipe(
+            Effect.as(true),
+            Effect.catch(() => Effect.succeed(false)),
+          )
+          backoff.failures = ok ? 0 : backoff.failures + 1
+        })
+        const wait = () =>
+          Duration.millis(
+            Math.min(
+              Duration.toMillis(interval) * 2 ** backoff.failures,
+              Duration.toMillis(MAX_BACKOFF),
+            ),
+          )
+        yield* probe().pipe(
+          Effect.andThen(Effect.suspend(() => Effect.sleep(wait()))),
+          Effect.forever,
+          Effect.forkScoped,
+        )
         const reload = Effect.fn("LocalProviderPlugin.reload")(function* () {
           const next = configured(yield* config.entries(), input.providerID, defaultOrigin, suffix)
           if (
@@ -138,9 +159,10 @@ export function createLocalProviderPlugin<Discovered>(input: {
           source.current = next
           loaded.models = []
           loaded.hash = "[]"
+          backoff.failures = 0
           yield* ctx.integration.reload()
           yield* ctx.provider.reload()
-          yield* refresh().pipe(Effect.ignore)
+          yield* probe()
         })
         yield* ctx.event.subscribe().pipe(
           Stream.filter((event) => event.type === "config.updated"),

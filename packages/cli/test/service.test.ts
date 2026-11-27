@@ -309,7 +309,7 @@ test("deleting a failed service registration stops its owner", async () => {
   } finally {
     await stopManagedService(service)
   }
-}, 30_000)
+}, 45_000)
 
 test("clean managed service shutdown removes its registration", async () => {
   const service = await startManagedService("opencode-service-clean-")
@@ -371,7 +371,7 @@ test("concurrent service processes elect one server", async () => {
     try {
       const contenderExited = await Promise.race([
         contender.exited.then(() => true),
-        Bun.sleep(10_000).then(() => false),
+        Bun.sleep(35_000).then(() => false),
       ])
       expect(contenderExited).toBe(true)
       expect(contender.exitCode).toBe(0)
@@ -686,7 +686,7 @@ test("a failed service stays registered and owns the selected port until stopped
     expect(owner.exitCode).toBe(null)
 
     const contender = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
-    expect(await Promise.race([contender.exited.then(() => true), Bun.sleep(10_000).then(() => false)])).toBe(true)
+    expect(await Promise.race([contender.exited.then(() => true), Bun.sleep(35_000).then(() => false)])).toBe(true)
     expect(contender.exitCode).toBe(0)
     expect((await waitForInfo(registration)).id).toBe(info.id)
     expect(owner.exitCode).toBe(null)
@@ -803,7 +803,7 @@ async function stopManagedService(service: Awaited<ReturnType<typeof startManage
   await fs.rm(service.root, { recursive: true, force: true })
 }
 
-function waitForExit(process: Bun.Subprocess, timeout = 10_000) {
+function waitForExit(process: Bun.Subprocess, timeout = 35_000) {
   return Promise.race([process.exited.then(() => true), Bun.sleep(timeout).then(() => false)])
 }
 

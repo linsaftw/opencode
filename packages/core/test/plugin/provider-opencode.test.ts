@@ -622,8 +622,9 @@ describe("OpencodePlugin", () => {
           expect(state.requests).toBe(1)
           expect(yield* websearch.default()).toBeUndefined()
 
+          // Periodic Console checks run every 15 minutes; nothing is fetched inside that window.
           state.advertised = true
-          yield* TestClock.adjust("50 seconds")
+          yield* TestClock.adjust("890 seconds")
           yield* drain
           expect(state.requests).toBe(1)
           expect(rebuilds).toEqual(initial)
@@ -635,14 +636,14 @@ describe("OpencodePlugin", () => {
           expect(rebuilds).toEqual({ provider: initial.provider + 1, websearch: initial.websearch + 1 })
           expect(yield* websearch.default()).toEqual({ id: WebSearch.ID.make("opencode"), name: "OpenCode Web Search" })
 
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(state.requests).toBe(3)
           expect(rebuilds).toEqual({ provider: initial.provider + 1, websearch: initial.websearch + 1 })
           expect(yield* websearch.default()).toEqual({ id: WebSearch.ID.make("opencode"), name: "OpenCode Web Search" })
 
           state.failing = true
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(state.requests).toBe(4)
           expect(rebuilds).toEqual({ provider: initial.provider + 1, websearch: initial.websearch + 1 })
@@ -650,7 +651,7 @@ describe("OpencodePlugin", () => {
 
           state.failing = false
           state.advertised = false
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(state.requests).toBe(5)
           expect(rebuilds).toEqual({ provider: initial.provider + 2, websearch: initial.websearch + 2 })
@@ -757,7 +758,7 @@ describe("OpencodePlugin", () => {
           })
 
           state.advertised = false
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(servers()).toEqual({})
           expect(reloads.count).toBe(1)
@@ -884,25 +885,25 @@ describe("OpencodePlugin", () => {
             {},
           ]) {
             state.policies = [env, malformed]
-            yield* TestClock.adjust("1 minute")
+            yield* TestClock.adjust("15 minutes")
             yield* drain
             expect(managed.current()).toEqual({ statements: [sudo], organization: "Acme" })
             expect(yield* providers.get(Provider.ID.opencode)).toBeDefined()
           }
 
           state.policies = [env, { action: "tool.use", resource: "shell:*", effect: "future-effect" }]
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(managed.current()).toEqual({ statements: [env], organization: "Acme" })
 
           state.policies = [{ action: "future.use", future: { values: [true] } }]
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(managed.current()).toEqual({ statements: [], organization: "Acme" })
           expect(yield* providers.get(Provider.ID.opencode)).toBeDefined()
 
           state.policies = [{ action: "future.use", effect: { next: true } }, env]
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(managed.current()).toEqual({ statements: [env], organization: "Acme" })
         }),
@@ -957,20 +958,20 @@ describe("OpencodePlugin", () => {
           expect(managed.current()).toEqual({ statements: [], organization: "Alpha" })
 
           state.policies.org_alpha = [sudo]
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(state.requests).toBe(2)
           expect(managed.current()).toEqual({ statements: [sudo], organization: "Alpha" })
           expect(rebuilds.count).toBe(initial + 1)
 
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(state.requests).toBe(3)
           expect(rebuilds.count).toBe(initial + 1)
 
           // An outage for the same connection keeps the last statements instead of lifting them.
           state.status = 503
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(state.requests).toBe(4)
           expect(managed.current()).toEqual({ statements: [sudo], organization: "Alpha" })
@@ -986,7 +987,7 @@ describe("OpencodePlugin", () => {
           expect(managed.current()).toEqual({ statements: [env], organization: "Beta" })
 
           state.status = 404
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(managed.current()).toEqual({ statements: [], organization: "Beta" })
 
@@ -1052,14 +1053,14 @@ describe("OpencodePlugin", () => {
           expect(yield* status()).toBeUndefined()
 
           state.sso = true
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           const url = `${server.url.origin}/console/auth/sso/ssoconn%2F1/start?redirectTo=%2Fconsole%2F`
           expect(yield* status()).toEqual({ status: "needs_auth", message: "Sign in with SSO again to use Acme", url })
           expect(managed.current()).toEqual({ statements: [sudo], organization: "Acme" })
 
           state.sso = false
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(yield* status()).toBeUndefined()
           expect(managed.current()).toEqual({ statements: [sudo], organization: "Acme" })
@@ -1168,7 +1169,7 @@ describe("OpencodePlugin", () => {
             () => Response.json({ _tag: "Forbidden", orgId: "org", connectionId: "ssoconn" }, { status: 403 }),
           ]) {
             state.body = body()
-            yield* TestClock.adjust("1 minute")
+            yield* TestClock.adjust("15 minutes")
             yield* drain
             expect((yield* integrations.get(Integration.ID.make("opencode")))?.connections[0]?.status).toBeUndefined()
             expect(managed.current().statements).toEqual([sudo])
@@ -1194,7 +1195,7 @@ describe("OpencodePlugin", () => {
       yield* addPlugin().pipe(Effect.provideService(HttpClient.HttpClient, http))
       yield* drain
       state.status = 503
-      yield* TestClock.adjust("1 minute")
+      yield* TestClock.adjust("15 minutes")
       yield* drain
 
       // An unreleased response is only aborted when garbage collected, which fails outside a request on workerd.
@@ -1284,7 +1285,7 @@ describe("OpencodePlugin", () => {
           expect((yield* credentials.get(credential.id))?.value).toMatchObject({ access: "revoked" })
 
           state.revoked = false
-          yield* TestClock.adjust("1 minute")
+          yield* TestClock.adjust("15 minutes")
           yield* drain
           expect(yield* status()).toBeUndefined()
           expect(state.refreshes).toBe(0)

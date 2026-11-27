@@ -60,7 +60,7 @@ export const register = Effect.fnUntraced(function* (options: {
           }),
     ),
     Effect.filterOrFail(owns),
-    Effect.repeat(Schedule.spaced("5 seconds")),
+    Effect.repeat(Schedule.spaced("30 seconds")),
     Effect.ignore,
     Effect.andThen(options.shutdown),
     Effect.forkScoped,

@@ -274,6 +274,9 @@ const Cache = Schema.Struct({
   // Digest of the raw body, persisted so refresh() can skip republishing a
   // byte-identical catalog. Optional for entries written before it existed.
   digest: Schema.optional(Schema.String),
+  // Validator from the last 200 response; sent as If-None-Match so an unchanged
+  // catalog comes back as a body-less 304.
+  etag: Schema.optional(Schema.String),
   body: CatalogJson,
 })
 const defaultSource = "https://models.opencode.ai"
@@ -313,7 +316,8 @@ export const layer = (options?: Options) =>
       const bus = yield* Bus.Service
       const app = yield* App.Metadata
       const kv = yield* KV.Service
-      const http = HttpClient.filterStatusOk(
+      // 304 is a success for conditional requests; every other non-2xx still fails.
+      const http = HttpClient.filterStatus(
         (yield* HttpClient.HttpClient).pipe(
           HttpClient.retryTransient({
             retryOn: "errors-and-responses",
@@ -321,13 +325,16 @@ export const layer = (options?: Options) =>
             schedule: Schedule.exponential(200).pipe(Schedule.jittered),
           }),
         ),
+        (status) => status === 304 || (status >= 200 && status < 300),
       )
 
       const source = options?.url || defaultSource
       const fetch = options?.fetch ?? true
       const userAgent = App.useragent(app)
       const key = cacheKey(source)
-      const ttl = Duration.minutes(5)
+      // models.dev changes rarely; the periodic refresh checks at most hourly and
+      // the conditional GET below keeps each check to a header-only round trip.
+      const ttl = Duration.hours(1)
       const lock = Semaphore.makeUnsafe(1)
 
       const loadFromCache = Effect.fnUntraced(function* () {
@@ -338,15 +345,21 @@ export const layer = (options?: Options) =>
             catalog: cached.value.body as Record<string, SourceProvider>,
             updatedAt: cached.value.updatedAt,
             digest: cached.value.digest,
+            etag: cached.value.etag,
           }
         if (value !== undefined) yield* kv.remove(key)
       })
 
-      const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
+      // undefined means 304 Not Modified for the given etag.
+      const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* (etag?: string) {
         return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
-          HttpClientRequest.setHeader("User-Agent", userAgent),
+          HttpClientRequest.setHeaders({ "User-Agent": userAgent, ...(etag ? { "If-None-Match": etag } : {}) }),
           http.execute,
-          Effect.flatMap((res) => res.text),
+          Effect.flatMap((res) =>
+            res.status === 304
+              ? Effect.succeed(undefined)
+              : res.text.pipe(Effect.map((text) => ({ text, etag: res.headers["etag"] }))),
+          ),
           Effect.timeout("10 seconds"),
         )
       })
@@ -366,8 +379,12 @@ export const layer = (options?: Options) =>
       // population. The payload has outgrown some KV backends' per-value
       // limits (Durable Object SQLite caps values at 2 MB and api.json
       // passed it in Aug 2026); a boot without a cache hit just refetches.
-      const writeCache = Effect.fn("ModelsDev.writeCache")(function* (text: string, digest = bodyDigest(text)) {
-        yield* kv.set(key, { updatedAt: Date.now(), digest, body: text }).pipe(
+      const writeCache = Effect.fn("ModelsDev.writeCache")(function* (
+        text: string,
+        etag: string | undefined,
+        digest = bodyDigest(text),
+      ) {
+        yield* kv.set(key, { updatedAt: Date.now(), digest, ...(etag ? { etag } : {}), body: text }).pipe(
           Effect.catchCauseIf(
             (cause) => !Cause.hasInterruptsOnly(cause),
             (cause) => Effect.logWarning("Failed to cache models.dev catalog", { cause }),
@@ -376,9 +393,10 @@ export const layer = (options?: Options) =>
       })
 
       const fetchAndWrite = Effect.fn("ModelsDev.fetchAndWrite")(function* () {
-        const text = yield* fetchApi()
-        const catalog = yield* decodeCatalog(text)
-        yield* writeCache(text)
+        const fetched = yield* fetchApi()
+        if (!fetched) return yield* Effect.die("models.dev answered 304 to an unconditional request")
+        const catalog = yield* decodeCatalog(fetched.text)
+        yield* writeCache(fetched.text, fetched.etag)
         return catalog
       })
 
@@ -410,14 +428,17 @@ export const layer = (options?: Options) =>
             Effect.gen(function* () {
               const stored = yield* loadFromCache()
               if (!force && stored && Date.now() - stored.updatedAt < Duration.toMillis(ttl)) return
-              const text = yield* fetchApi()
-              const digest = bodyDigest(text)
+              // A forced refresh always fetches the full body.
+              const fetched = yield* fetchApi(force ? undefined : stored?.etag)
+              // 304: the stored catalog is still current; nothing to publish.
+              if (!fetched) return
+              const digest = bodyDigest(fetched.text)
               // models.dev rarely changes between polls; skip the cache write,
               // invalidation, and Refreshed event for a byte-identical body so
               // downstream provider/model update listeners stay quiet.
               if (!force && stored?.digest === digest) return
-              yield* decodeCatalog(text)
-              yield* writeCache(text, digest)
+              yield* decodeCatalog(fetched.text)
+              yield* writeCache(fetched.text, fetched.etag, digest)
               yield* invalidate
               yield* bus.publish(ModelsDev.Event.Refreshed, {})
             }),
