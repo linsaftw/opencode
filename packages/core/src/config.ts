@@ -32,9 +32,15 @@ export function latest<K extends keyof Info>(entries: readonly Entry[], key: K):
     ?.info[key]
 }
 
+// Process-wide sequence: every generation gets a value no earlier one used, so sums over cached contexts never repeat.
+let configGenerations = 0
+const nextGeneration = () => (configGenerations += 1)
+
 export interface Interface {
   /** Returns location config documents and discovery sources from lowest to highest priority. */
   readonly entries: () => Effect.Effect<Entry[]>
+  /** Sync; changes whenever the resolved config documents change (reload, integration, update, test setEntries). */
+  readonly version?: () => number
   /** Compatibility roots consumed by internal compatibility plugins. */
   readonly compatibility?: () => Effect.Effect<{
     readonly claude: readonly AbsolutePath[]
@@ -101,14 +107,23 @@ export const testLayer = (
       const entries = yield* Ref.make(initial)
       const integrations = yield* Ref.make(new Map<string, ConfigIntegration.Document>())
       const updates = yield* PubSub.unbounded<Watcher.Update>()
+      let version = nextGeneration()
       const service = Test.of({
         entries: () =>
           Effect.all([Ref.get(integrations), Ref.get(entries)]).pipe(
             Effect.map(([documents, entries]) => [...documents.values(), ...entries]),
           ),
+        version: () => version,
         compatibility: () => Effect.succeed(compatibility),
         changes: () => Stream.fromPubSub(updates),
-        setEntries: (next) => Ref.set(entries, next),
+        setEntries: (next) =>
+          Ref.set(entries, next).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                version = nextGeneration()
+              }),
+            ),
+          ),
         emitChange: (update) => PubSub.publish(updates, update).pipe(Effect.asVoid),
         integration: (integrationID, document) =>
           Ref.update(integrations, (current) => {
@@ -117,7 +132,13 @@ export const testLayer = (
             const next = new Map(current)
             next.delete(integrationID)
             return document ? next.set(integrationID, document) : next
-          }),
+          }).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                version = nextGeneration()
+              }),
+            ),
+          ),
       })
       return Context.empty().pipe(Context.add(Service, service), Context.add(Test, service))
     }),
@@ -414,6 +435,7 @@ export const layer = (options?: Options) =>
 
       const initial = yield* ConfigDiscovery.discover(options)
       let { configs, isInput, sources } = yield* load(initial)
+      let version = nextGeneration()
       const updates = yield* PubSub.unbounded<Watcher.Update>()
       const reloads = yield* PubSub.sliding<void>(1)
       // Readiness rescans recover writes made before a watch attached.
@@ -459,6 +481,7 @@ export const layer = (options?: Options) =>
           if (isDeepStrictEqual(configs, next.configs) && !compatibilityChanged) return
           sources = next.sources
           configs = next.configs
+          version = nextGeneration()
           yield* bus.publish(Event.Updated, {})
         },
         (effect) => reloadLock.withPermit(effect),
@@ -539,6 +562,7 @@ export const layer = (options?: Options) =>
         entries: Effect.fnUntraced(function* () {
           return configs
         }),
+        version: () => version,
         compatibility: () =>
           Effect.all({
             claude: Effect.filter(sources.claude, fs.isDir),

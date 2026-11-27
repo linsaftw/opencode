@@ -37,10 +37,26 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
 
       // Read across every instance cached at the Location (default and private): any opt-out disables eviction,
       // otherwise keep the longest configured timeout so no instance is swept before its own deadline.
+      // Config is re-read only when a context's config version moved or the location left the cache.
+      const idleTimeouts = new Map<string, { readonly version: number; readonly value: Duration.Duration | false }>()
       const idleTimeout = (ref: Location.Ref) =>
         Effect.gen(function* () {
+          const id = key(ref)
           const contexts = yield* locations.cachedContexts(ref)
-          if (contexts.length === 0) return timeToLive
+          if (contexts.length === 0) {
+            idleTimeouts.delete(id)
+            return timeToLive
+          }
+          const versions = contexts.map((context) =>
+            Option.match(Context.getOption(context, Config.Service), {
+              onNone: () => 0,
+              onSome: (config) => config.version?.(),
+            }),
+          )
+          const known = versions.filter((version): version is number => version !== undefined)
+          const version = known.length === versions.length ? known.reduce((sum, value) => sum + value, 0) : undefined
+          const cached = idleTimeouts.get(id)
+          if (cached && version !== undefined && cached.version === version) return cached.value
           const timeouts = yield* Effect.forEach(contexts, (context) => {
             const config = Context.getOption(context, Config.Service)
             if (Option.isNone(config)) return Effect.succeed(timeToLive)
@@ -52,7 +68,7 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
               return configured?.info.experimental?.location_idle_timeout ?? timeToLive
             })
           })
-          return timeouts.reduce<false | Duration.Duration>(
+          const value = timeouts.reduce<false | Duration.Duration>(
             (longest, timeout) =>
               longest === false || timeout === false
                 ? false
@@ -61,6 +77,8 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
                   : longest,
             Duration.zero,
           )
+          if (version !== undefined) idleTimeouts.set(id, { version, value })
+          return value
         }).pipe(
           Effect.scoped,
           Effect.catchCause(() => Effect.succeed(timeToLive)),
@@ -94,7 +112,10 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
         const cached = new Set(refs.map(key))
         yield* Effect.forEach(refs, (ref) => (entries.has(key(ref)) ? Effect.void : touch(ref)), { discard: true })
         for (const id of entries.keys()) {
-          if (!cached.has(id)) entries.delete(id)
+          if (!cached.has(id)) {
+            entries.delete(id)
+            idleTimeouts.delete(id)
+          }
         }
         const now = clock.currentTimeMillisUnsafe()
         const expired = yield* Effect.filter(Array.from(entries.values()), (entry) =>
@@ -121,6 +142,7 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
             Effect.gen(function* () {
               if (occupied.has(key(entry.ref)) || (yield* retained(entry.ref))) return yield* touch(entry.ref)
               entries.delete(key(entry.ref))
+              idleTimeouts.delete(key(entry.ref))
               yield* Effect.logInfo("location services evicted", {
                 directory: entry.ref.directory,
                 workspaceID: entry.ref.workspaceID,

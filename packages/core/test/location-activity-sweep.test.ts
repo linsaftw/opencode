@@ -6,6 +6,7 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
+import { ConfigIntegration } from "@opencode/core/config/integration"
 import { Database } from "@opencode/core/database/database"
 import { Form } from "@opencode/core/form"
 import { Job } from "@opencode/core/job"
@@ -15,6 +16,8 @@ import { LocationServiceMap, type LocationServices } from "@opencode/core/locati
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Workspace } from "@opencode/core/workspace"
+import { Document, Info } from "@opencode/schema/config"
+import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionStore } from "@opencode/core/session/store"
 import { SessionRunner } from "@opencode/core/session/runner/index"
@@ -126,9 +129,56 @@ describe("LocationActivity sweep probe", () => {
           heapBytesPerEntry: Math.round((heapLoaded - heapBefore) / COUNT),
         }),
       )
-      expect(hourReads).toBeGreaterThan(0)
+      // One read per location on the first sweep; the config version is unchanged for the rest of the hour.
+      expect(hourReads).toBe(COUNT)
       expect(timeline.at(-1)!.cached).toBe(0)
       expect(evictedAt.map((row) => row.minute)).toEqual([61])
+    }),
+  )
+
+  // Config replaced mid-hour through setEntries (the reload path) and integration (the integration path). The
+  // version bump must make the next sweep re-read: a 5 minute timeout evicts at minute 11, not at the 60 minute deadline.
+  it.effect("applies a config change made mid-hour on the next sweep", () =>
+    Effect.gen(function* () {
+      const map = yield* LocationServiceMap.Service
+      const names = ["setEntries", "integration", "untouched"]
+      const refs = names.map((name) =>
+        Location.Ref.make({
+          directory: AbsolutePath.make("/project"),
+          workspaceID: Workspace.ID.make(`wrk_mid_${name}`),
+        }),
+      )
+      const [setEntriesConfig, integrationConfig] = (
+        yield* Effect.forEach(refs, (ref) => Config.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped))
+      ).map((service) => service as unknown as Config.TestInterface)
+      const fiveMinutes = () =>
+        new Document({
+          type: "document",
+          info: new Info({
+            experimental: new ConfigExperimental.Info({ location_idle_timeout: Duration.minutes(5) }),
+          }),
+        })
+
+      const evicted: Array<{ minute: number; workspaceID: string | undefined }> = []
+      let known = new Set(refs.map((ref) => ref.workspaceID))
+      for (let minute = 1; minute <= 20; minute++) {
+        yield* TestClock.adjust("1 minute")
+        if (minute === 10) {
+          yield* setEntriesConfig.setEntries([fiveMinutes()])
+          yield* integrationConfig.integration!(
+            "wrk_mid_integration" as ConfigIntegration.Document["integrationID"],
+            fiveMinutes() as unknown as ConfigIntegration.Document,
+          )
+        }
+        const live = new Set((yield* map.keys).map((ref) => ref.workspaceID))
+        for (const id of known) if (!live.has(id)) evicted.push({ minute, workspaceID: id })
+        known = live
+      }
+      expect(evicted).toEqual([
+        { minute: 11, workspaceID: "wrk_mid_setEntries" },
+        { minute: 11, workspaceID: "wrk_mid_integration" },
+      ])
+      expect(known.has(Workspace.ID.make("wrk_mid_untouched"))).toBe(true)
     }),
   )
 })
