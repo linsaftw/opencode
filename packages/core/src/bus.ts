@@ -209,7 +209,18 @@ export function configured(options?: Options) {
         const isSessionEvent = (event: Event.Payload): event is SessionEvent.Event =>
           Object.hasOwn(SessionEvent.All.cases, event.type)
 
+        // Ephemeral deltas carry their own location and never change routing, so
+        // a publish without routing work reuses this shared no-op instead of allocating tables.
+        const noRoutes = () => {}
+        const needsRoute = (event: SessionEvent.Event) =>
+          event.type === "session.created" ||
+          event.type === "session.deleted" ||
+          event.type === "session.forked" ||
+          event.type === "session.moved" ||
+          !event.location
+
         const prepareRoutes = Effect.fnUntraced(function* (events: readonly Event.Payload[]) {
+          if (!events.some((event) => isSessionEvent(event) && needsRoute(event))) return noRoutes
           const updates = new Map<SessionID, Location.Ref | undefined>()
           const resolved = new Map<Event.Payload, readonly Location.Ref[]>()
           for (const event of events) {
@@ -493,11 +504,12 @@ export function configured(options?: Options) {
 
         function notify(event: Event.Payload, isolateListeners: boolean) {
           return Effect.gen(function* () {
-            yield* Effect.forEach(
-              listeners,
-              (listener) => (isolateListeners ? observe(event, listener) : listener(event)),
-              { discard: true },
-            )
+            if (listeners.length > 0)
+              yield* Effect.forEach(
+                listeners,
+                (listener) => (isolateListeners ? observe(event, listener) : listener(event)),
+                { discard: true },
+              )
             const typed = pubsub.typed.get(event.type)
             if (typed) yield* PubSub.publish(typed, event)
             yield* PubSub.publish(pubsub.live, event)

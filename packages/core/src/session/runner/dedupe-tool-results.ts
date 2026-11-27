@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { Message } from "@opencode/ai"
 
 /** Request-only deduplication: persisted tool outputs and the latest observation stay intact. */
@@ -14,7 +13,8 @@ export const dedupe = (messages: readonly Message[]): Message[] => {
       if (part.type !== "tool-result" || !allowed.has(part.name) || part.providerExecuted || part.providerMetadata)
         return part
       if (part.result.type !== "text" || typeof part.result.value !== "string" || part.result.value.length < 2048) return part
-      const digest = createHash("sha256").update(part.name).update("\0").update(part.result.value).digest("hex")
+      // Non-cryptographic 64-bit hash: outputs are local tool results, not adversarial input.
+      const digest = `${part.name}\0${Bun.hash(part.result.value)}`
       const latest = seen.get(digest)
       if (latest === undefined) {
         seen.set(digest, part.id)

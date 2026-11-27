@@ -31,9 +31,11 @@ const layer = Layer.effect(
     const scope = yield* Effect.scope
     yield* project.activate(location.project.id)
     const unsubscribe = yield* bus.listen((event) => {
-      if (!isSessionEvent(event) || !event.location) return Effect.void
+      if (!event.location) return Effect.void
       const ref = LocationServiceMap.canonical(event.location)
       if (ref.directory !== location.directory || ref.workspaceID !== location.workspaceID) return Effect.void
+      // Schema validation is the costliest check; run it only for events in this location.
+      if (!isSessionEvent(event)) return Effect.void
       // Listeners run inside publish; keep the write and its Project event off that path.
       return project.activate(location.project.id).pipe(Effect.forkIn(scope), Effect.asVoid)
     })
