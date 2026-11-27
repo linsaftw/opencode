@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { decide, type LocalService } from "../src/service-probe"
+import { defaultEnsureTiming, unresponsiveVerdict, type Unresponsive } from "../src/service-timing"
 
 const protocolError =
   "Background service uses an incompatible health protocol. Update this client or explicitly restart the service."
@@ -50,5 +51,40 @@ test("a version mismatch replaces the service, handing off terminals only when i
   expect(decide(service({ version: "1.0.0", state: "failed", compatible: true }), { version: "2.0.0" })).toEqual({
     _tag: "replace",
     pty: "clear",
+  })
+})
+
+// Simulates probes that each time out after requestTimeout, as ensure() sees them, on a fake clock.
+function timeline(cpu: (tick: number) => number | undefined, seconds: number) {
+  const terminations: number[] = []
+  let prior: Unresponsive | undefined
+  for (let at = 10_000; at <= seconds * 1000; at += defaultEnsureTiming.requestTimeout) {
+    const verdict = unresponsiveVerdict(prior, at, cpu(at), defaultEnsureTiming)
+    if (verdict.terminate) {
+      terminations.push(at)
+      prior = undefined
+      continue
+    }
+    prior = { since: verdict.since, cpu: verdict.cpu }
+  }
+  return terminations
+}
+
+test("a slow but alive owner whose CPU keeps advancing is never terminated", () => {
+  expect(timeline((at) => at, 600)).toEqual([])
+})
+
+test("a hung owner with no CPU progress is terminated once, after 60 s of wall-clock timeouts", () => {
+  expect(timeline(() => 1_000, 130)).toEqual([70_000])
+})
+
+test("without /proc the wall-clock rule alone terminates a silent owner", () => {
+  expect(timeline(() => undefined, 80)).toEqual([70_000])
+})
+
+test("a version mismatch still replaces without waiting for the unresponsive grace", () => {
+  expect(decide(service({ version: "1.0.0", state: "ready", compatible: true }), { version: "2.0.0" })).toEqual({
+    _tag: "replace",
+    pty: "handoff",
   })
 })

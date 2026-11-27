@@ -1,7 +1,14 @@
 import { readFile, rm } from "node:fs/promises"
 import type { DiscoverOptions, Endpoint, Info, EnsureOptions, StopOptions } from "../service.js"
 import { contenderPool, spawnServiceContender } from "../service-contender.js"
-import { defaultEnsureTiming, ensureTiming, type EnsureTiming } from "../service-timing.js"
+import {
+  defaultEnsureTiming,
+  ensureTiming,
+  processCpuTicks,
+  unresponsiveVerdict,
+  type EnsureTiming,
+  type Unresponsive,
+} from "../service-timing.js"
 import { matchesVersion } from "../service-version.js"
 import { PtyHandoff } from "../pty-handoff.js"
 import { decide, fallback, headers, probeResult, same } from "../service-probe.js"
@@ -29,7 +36,7 @@ export async function ensure(options: EnsureOptions = {}): Promise<Endpoint> {
   const timing = ensureTiming(options)
   const deadline = Date.now() + timing.promiseTimeout
   const pool = contenderPool(timing)
-  let timeouts: { readonly info: Info; readonly count: number } | undefined
+  let hung: (Unresponsive & { readonly info: Info }) | undefined
   let announced = false
 
   const announce = (reason: "missing" | "version-mismatch", previousVersion?: string) => {
@@ -52,21 +59,25 @@ export async function ensure(options: EnsureOptions = {}): Promise<Endpoint> {
       if (Date.now() >= deadline)
         throw pool.failure() ?? new Error("Timed out waiting for the background service to start")
       const registration = await registered(options.file, timing.requestTimeout)
-      if (registration.timedOut && registration.info !== undefined) {
-        timeouts = {
-          info: registration.info,
-          count: timeouts !== undefined && same(timeouts.info, registration.info) ? timeouts.count + 1 : 1,
-        }
-        if (timeouts.count >= 3) {
+      const info = registration.info
+      if (registration.timedOut && info !== undefined) {
+        const verdict = unresponsiveVerdict(
+          hung !== undefined && same(hung.info, info) ? hung : undefined,
+          Date.now(),
+          processCpuTicks(info.pid),
+          timing,
+        )
+        hung = { info, since: verdict.since, cpu: verdict.cpu }
+        if (verdict.terminate) {
           announce("missing")
           console.warn("Background service is unresponsive; recovery cannot preserve persistent terminals")
           await PtyHandoff.clear(options.file ?? fallback())
-          await terminate(registration.info, options, timing)
-          pool.evict(registration.info.pid)
+          await terminate(info, options, timing)
+          pool.evict(info.pid)
           pool.recruitNow()
-          timeouts = undefined
+          hung = undefined
         }
-      } else timeouts = undefined
+      } else hung = undefined
 
       if (registration.service !== undefined) {
         pool.serviceAnswered()
