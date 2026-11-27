@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
+import { and, asc, desc, eq, getTableColumns, gte, inArray, lt, or, sql } from "drizzle-orm"
 import { Message } from "@opencode/ai/effect"
 import { Effect, Option, Schema } from "effect"
 import type { Model } from "@opencode/schema/model"
@@ -52,13 +52,13 @@ const replayable = (message: SessionMessage.Info, boundary: Boundary) =>
     message.model.id === boundary.id &&
     decodesWindow(message.native.messages))
 
-const latestCompaction = Effect.fnUntraced(function* (
+const latestCompactionQuery = (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
   boundary: Boundary,
   before?: number,
-) {
-  return yield* db
+) =>
+  db
     .select({ seq: SessionMessageTable.seq })
     .from(SessionMessageTable)
     .where(
@@ -83,8 +83,14 @@ const latestCompaction = Effect.fnUntraced(function* (
     )
     .orderBy(desc(SessionMessageTable.seq))
     .limit(1)
-    .get()
-    .pipe(Effect.orDie)
+
+const latestCompaction = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  boundary: Boundary,
+  before?: number,
+) {
+  return yield* latestCompactionQuery(db, sessionID, boundary, before).get().pipe(Effect.orDie)
 })
 
 /**
@@ -218,19 +224,22 @@ const messageEntries = Effect.fnUntraced(function* (
   ReadonlyArray<{ readonly seq: number; readonly message: SessionMessage.Info }>,
   MessageDecodeError
 > {
-  const compaction = yield* latestCompaction(db, sessionID, boundary, before)
+  // The latest compaction is resolved inside the same statement: rows start at it, and `compaction` carries its seq
+  // (null when there is none). A compaction row is itself in the result, so `rows[0]` is non-empty iff one exists.
+  const latest = latestCompactionQuery(db, sessionID, boundary, before)
   const rows = yield* db
-    .select()
+    .select({ ...getTableColumns(SessionMessageTable), compaction: sql<number | null>`(${latest})` })
     .from(SessionMessageTable)
     .where(
       and(
         eq(SessionMessageTable.session_id, sessionID),
-        compaction ? gte(SessionMessageTable.seq, compaction.seq) : undefined,
+        gte(SessionMessageTable.seq, sql<number>`coalesce((${latest}), 0)`),
       ),
     )
     .orderBy(asc(SessionMessageTable.seq))
     .all()
     .pipe(Effect.orDie)
+  const compaction = rows[0]?.compaction ?? undefined
   // Keyed on the hydrated row (parts and inline media included), so a hit implies an identical decode.
   const hydrated = yield* SessionBlob.hydrate(db, yield* withParts(db, rows))
   const previous = decodedRows.get(sessionID)
@@ -255,7 +264,7 @@ const messageEntries = Effect.fnUntraced(function* (
   // A window that cannot replay leaves nothing to start from, so read from the compaction before it.
   const start = decoded[0]
   if (compaction && start && !replayable(start.message, boundary))
-    return yield* messageEntries(db, sessionID, boundary, compaction.seq)
+    return yield* messageEntries(db, sessionID, boundary, compaction)
   const entries = compaction ? yield* withRecentText(db, sessionID, decoded) : decoded
   // Re-expansion may cross a native checkpoint whose completion already advanced the instruction
   // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline
