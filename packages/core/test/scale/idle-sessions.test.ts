@@ -63,7 +63,8 @@ const layer = Layer.provideMerge(appLayer, countingClock)
 const scaleIt = testEffect(layer)
 
 // Heap ceiling per idle session in bytes. Set from the first measured run plus 50%.
-const HEAP_PER_SESSION_CEILING = 256 * 1024
+// Measured worst case 50613 B/session (sim, N=50, includes warm-up) + 50% = 75920 B, rounded up.
+const HEAP_PER_SESSION_CEILING = 76_000
 
 type Row = {
   mode: "sim" | "real"
@@ -131,7 +132,7 @@ const scenario = (mode: Row["mode"], n: number) =>
     // Per-session timers must be zero: total pending may only grow by a constant.
     expect(pendingAfterCreate).toBeLessThanOrEqual(1)
     expect(startedDuringWindow).toBeLessThanOrEqual(1)
-    expect(heapPerSession).toBeLessThanOrEqual(HEAP_PER_SESSION_CEILING * 1.5)
+    expect(heapPerSession).toBeLessThanOrEqual(HEAP_PER_SESSION_CEILING)
   })
 
 describe("idle session scale", () => {

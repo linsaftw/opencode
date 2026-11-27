@@ -625,6 +625,8 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
         id: SessionMessageTable.id,
         seq: SessionMessageTable.seq,
         inlineCount: sql<number>`json_array_length(${SessionMessageTable.data}, '$.content')`,
+        // Next free ordinal, read in the same statement so appends need no separate max() lookup.
+        next: sql<number>`coalesce((select max(${SessionPartTable.ordinal}) + 1 from ${SessionPartTable} where ${SessionPartTable.message_id} = ${messageID}), 0)`,
       })
       .from(SessionMessageTable)
       .where(
@@ -647,21 +649,16 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
             .pipe(Effect.orDie)
         : undefined
     const message = full ? SessionHistory.decodeMessageRowSync(full) : undefined
+    // `next` is the ordinal after any carried rows: the value the removed per-append max() lookup returned.
+    let next = row.next
     if (full && message?.type === "assistant") {
       if (carry) {
         // An older build that wrote inline content while part rows existed leaves both shapes on one message.
         // Keep the rows and append the inline parts after them, so a downgrade and re-upgrade loses nothing.
-        const last = yield* db
-          .select({ ordinal: sql<number | null>`max(${SessionPartTable.ordinal})` })
-          .from(SessionPartTable)
-          .where(eq(SessionPartTable.message_id, messageID))
-          .get()
-          .pipe(Effect.orDie)
-        const first = (last?.ordinal ?? -1) + 1
         const partRows = message.content.map((part, index) => ({
           message_id: messageID,
           session_id: event.data.sessionID,
-          ordinal: first + index,
+          ordinal: row.next + index,
           type: part.type,
           call_id: part.type === "tool" ? part.id : null,
           time_created: full.time_created,
@@ -669,6 +666,7 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
           data: SessionHistory.encodePart(part),
         }))
         yield* insertParts(db, partRows)
+        next += partRows.length
       }
       const { id: _, type: __, ...data } = encodeMessage({ ...message, content: [] })
       yield* db
@@ -678,7 +676,10 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
         .run()
         .pipe(Effect.orDie)
     }
-    return { sessionID: event.data.sessionID, messageID, seq: row.seq } satisfies SessionBlob.Owner
+    return {
+      owner: { sessionID: event.data.sessionID, messageID, seq: row.seq } satisfies SessionBlob.Owner,
+      next,
+    }
   })
   // Assistant content is written only by the part methods below, which also record its blob refs. Envelope updates
   // keep whatever content the row already holds: inline for a legacy row that was never split, [] once it was.
@@ -709,21 +710,16 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
     ...reads,
     appendAssistantPart(messageID, part) {
       return Effect.gen(function* () {
-        const owner = yield* prepareAssistantParts(messageID, true)
-        if (!owner) return
+        const prepared = yield* prepareAssistantParts(messageID, true)
+        if (!prepared) return
+        const { owner } = prepared
         const data = SessionHistory.encodePart(yield* SessionBlob.externalizePart(db, part))
-        const next = yield* db
-          .select({ ordinal: sql<number>`coalesce(max(${SessionPartTable.ordinal}) + 1, 0)` })
-          .from(SessionPartTable)
-          .where(eq(SessionPartTable.message_id, messageID))
-          .get()
-          .pipe(Effect.orDie)
         yield* db
           .insert(SessionPartTable)
           .values({
             message_id: messageID,
             session_id: event.data.sessionID,
-            ordinal: next?.ordinal ?? 0,
+            ordinal: prepared.next,
             type: part.type,
             call_id: part.type === "tool" ? part.id : null,
             time_created: event.created,
@@ -737,8 +733,9 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
     },
     updateAssistantPart(messageID, match, recipe) {
       return Effect.gen(function* () {
-        const owner = yield* prepareAssistantParts(messageID, true)
-        if (!owner) return
+        const prepared = yield* prepareAssistantParts(messageID, true)
+        if (!prepared) return
+        const { owner } = prepared
         const row = yield* db
           .select()
           .from(SessionPartTable)
@@ -779,8 +776,9 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
     },
     replaceAssistantParts(messageID, parts) {
       return Effect.gen(function* () {
-        const owner = yield* prepareAssistantParts(messageID, false)
-        if (!owner) return
+        const prepared = yield* prepareAssistantParts(messageID, false)
+        if (!prepared) return
+        const { owner } = prepared
         yield* db.delete(SessionPartTable).where(eq(SessionPartTable.message_id, messageID)).run().pipe(Effect.orDie)
         const stored = yield* Effect.forEach(parts, (part) => SessionBlob.externalizePart(db, part))
         const partRows = stored.map((part, ordinal) => ({

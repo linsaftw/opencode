@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "ea7fb45e-fef3-40b6-8e09-42b781c5bf23",
-  "prevIds": ["6fdb1fc8-74cd-4f15-8faa-e109d3030da9"],
+  "id": "28474bf2-04d0-4529-83ce-eef8229c37d8",
+  "prevIds": ["ea7fb45e-fef3-40b6-8e09-42b781c5bf23"],
   "ddl": [
     {
       "name": "account_state",
@@ -2758,12 +2758,60 @@
         {
           "value": "project_id",
           "isExpression": false
+        },
+        {
+          "value": "time_updated",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
         }
       ],
       "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "session_v2_project_idx",
+      "name": "session_v2_project_time_id_idx",
+      "entityType": "indexes",
+      "table": "session_v2"
+    },
+    {
+      "columns": [
+        {
+          "value": "directory",
+          "isExpression": false
+        },
+        {
+          "value": "time_updated",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "session_v2_directory_time_id_idx",
+      "entityType": "indexes",
+      "table": "session_v2"
+    },
+    {
+      "columns": [
+        {
+          "value": "time_updated",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "session_v2_time_id_idx",
       "entityType": "indexes",
       "table": "session_v2"
     },
