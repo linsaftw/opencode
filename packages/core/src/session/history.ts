@@ -75,6 +75,25 @@ export const decodeMessageRow = (row: typeof SessionMessageTable.$inferSelect) =
     ),
   )
 
+type DecodedRow = { readonly key: string; readonly message: SessionMessage.Info }
+
+/**
+ * Decoded rows per Session, keyed by message ID and validated by the row's serialized type and data.
+ * Rows are updated in place (projector), so a match requires identical content; a match implies an
+ * identical decode. Each read replaces its Session's map, so rows outside the read window are dropped.
+ * Only the most recently read Sessions are retained.
+ */
+const decodedRows = new Map<SessionSchema.ID, Map<string, DecodedRow>>()
+const decodedSessionLimit = 32
+
+const rememberDecodedRows = (sessionID: SessionSchema.ID, next: Map<string, DecodedRow>) => {
+  decodedRows.delete(sessionID)
+  decodedRows.set(sessionID, next)
+  if (decodedRows.size <= decodedSessionLimit) return
+  const oldest = decodedRows.keys().next()
+  if (!oldest.done) decodedRows.delete(oldest.value)
+}
+
 const messageEntries = Effect.fnUntraced(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
@@ -93,9 +112,22 @@ const messageEntries = Effect.fnUntraced(function* (
     .orderBy(asc(SessionMessageTable.seq))
     .all()
     .pipe(Effect.orDie)
+  const previous = decodedRows.get(sessionID)
+  const next = new Map<string, DecodedRow>()
   const entries = yield* Effect.forEach(rows, (row) =>
-    decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+    Effect.gen(function* () {
+      const key = JSON.stringify([row.type, row.data])
+      const hit = previous?.get(row.id)
+      if (hit?.key === key) {
+        next.set(row.id, hit)
+        return { seq: row.seq, message: hit.message }
+      }
+      const message = yield* decodeMessageRow(row)
+      next.set(row.id, { key, message })
+      return { seq: row.seq, message }
+    }),
   )
+  rememberDecodedRows(sessionID, next)
   // Re-expansion may cross a native checkpoint whose completion already advanced the instruction
   // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline
   // at sequence 0 but retain parent sequences, so the copied checkpoint still retires them.
