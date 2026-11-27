@@ -14,7 +14,6 @@ import {
   FiberSet,
   Layer,
   Ref,
-  Schedule,
   Schema,
   Scope,
 } from "effect"
@@ -161,6 +160,14 @@ const layer = (options: Options) =>
       const idleThreshold = Duration.toMillis(options.idleThreshold ?? Duration.minutes(20))
       const keepWarm = options.keepWarm === undefined ? idleThreshold : Duration.toMillis(options.keepWarm)
       const scheduledIdleAt = yield* Ref.make<number | undefined>(undefined)
+      // In-memory mirror of the KV idle index. Every write goes through armIdle/disarmIdle; reconcile() rebuilds it from KV.
+      const pending = new Map<ID, number>()
+      const scan = { at: Number.NEGATIVE_INFINITY }
+      // Sleep target of the poll loop; an arm that lands before it completes the current sleep early.
+      const wake = { at: Number.POSITIVE_INFINITY, signal: Deferred.makeUnsafe<void>() }
+      const pollFloor = Duration.toMillis(Duration.seconds(1))
+      const pollCap = Duration.toMillis(Duration.minutes(5))
+      const pollMs = Duration.toMillis(options.pollInterval ?? Duration.minutes(1))
 
       const find = (workspaceID: ID) =>
         db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get().pipe(Effect.orDie)
@@ -220,15 +227,33 @@ const layer = (options: Options) =>
           return [...entries, ...(yield* listPendingIdle(page.next))]
         })
 
+      const earliestPending = () => [...pending.values()].reduce((min, dueAt) => Math.min(min, dueAt), Number.POSITIVE_INFINITY)
+
+      const reconcile = Effect.fn("Workspace.reconcileIdle")(function* () {
+        const entries = yield* listPendingIdle()
+        for (const entry of entries) pending.set(entry.id, entry.dueAt)
+        scan.at = yield* Clock.currentTimeMillis
+      })
+
+      const armIdle = Effect.fn("Workspace.armIdle")(function* (workspaceID: ID, dueAt: number) {
+        pending.set(workspaceID, dueAt)
+        yield* kv.set(idleKey(workspaceID), dueAt)
+        if (dueAt < wake.at) Deferred.doneUnsafe(wake.signal, Exit.void)
+      })
+
+      const disarmIdle = Effect.fn("Workspace.disarmIdle")(function* (workspaceID: ID) {
+        pending.delete(workspaceID)
+        yield* kv.remove(idleKey(workspaceID))
+      })
+
       const scheduleNextIdle = (force = false) =>
         Effect.gen(function* () {
           if (!options.onIdleScheduled) return
-          const pending = yield* listPendingIdle()
-          if (pending.length === 0) {
+          if (pending.size === 0) {
             yield* Ref.set(scheduledIdleAt, undefined)
             return
           }
-          const earliest = pending.reduce((min, entry) => Math.min(min, entry.dueAt), Number.POSITIVE_INFINITY)
+          const earliest = earliestPending()
           if (!force && earliest === (yield* Ref.get(scheduledIdleAt))) return
           yield* options.onIdleScheduled(earliest).pipe(
             Effect.tap(() => Ref.set(scheduledIdleAt, earliest)),
@@ -304,15 +329,16 @@ const layer = (options: Options) =>
         connections.set(workspaceID, connection)
         yield* touch(workspaceID, now)
         // Arm a durable idle deadline on open so even a hard crash/eviction mid-operation suspends the sandbox later.
-        yield* kv.set(idleKey(workspaceID), now + idleThreshold)
+        yield* armIdle(workspaceID, now + idleThreshold)
         yield* scheduleNextIdle()
         return connection
       })
 
       const suspendIdle = Effect.fn("Workspace.suspendIdle")(function* () {
+        if ((yield* Clock.currentTimeMillis) - scan.at >= pollCap) yield* reconcile()
         const now = yield* Clock.currentTimeMillis
-        const pending = yield* listPendingIdle()
-        const candidates = new Set<ID>([...connections.keys(), ...pending.map((entry) => entry.id)])
+        const due = [...pending].flatMap(([id, dueAt]) => (dueAt <= now ? [id] : []))
+        const candidates = new Set<ID>([...connections.keys(), ...due])
 
         const results = yield* Effect.forEach(
           candidates,
@@ -321,12 +347,13 @@ const layer = (options: Options) =>
               Effect.gen(function* () {
                 const connection = connections.get(workspaceID)
                 const dueAt = yield* readIdleDue(workspaceID)
+                // Prune the mirror from KV truth: a removal that raced the last reconcile scan must not keep a stale deadline.
+                if (dueAt === undefined) pending.delete(workspaceID)
+                else pending.set(workspaceID, dueAt)
 
                 if (connection && (yield* Ref.get(connection.active)) > 0) {
-                  // Push past deadlines forward while an operation is still running so external schedulers never tight-loop.
-                  if (dueAt !== undefined && now >= dueAt) {
-                    yield* kv.set(idleKey(workspaceID), now + idleThreshold)
-                  }
+                  // Push past deadlines forward while an operation is still running (same grace as before the mirror).
+                  if (dueAt !== undefined && now >= dueAt) yield* armIdle(workspaceID, now + idleThreshold)
                   return undefined
                 }
 
@@ -335,7 +362,7 @@ const layer = (options: Options) =>
 
                 if (suspendAt === undefined || now < suspendAt) {
                   if (lastActivity !== undefined && now - lastActivity >= keepWarm) {
-                    if (dueAt === undefined) yield* kv.set(idleKey(workspaceID), lastActivity + idleThreshold)
+                    if (dueAt === undefined) yield* armIdle(workspaceID, lastActivity + idleThreshold)
                     yield* dropConnection(workspaceID)
                     yield* touch(workspaceID, lastActivity)
                   }
@@ -345,7 +372,7 @@ const layer = (options: Options) =>
                 const row = yield* find(workspaceID)
                 if (!row || !row.binding) {
                   yield* dropConnection(workspaceID)
-                  yield* kv.remove(idleKey(workspaceID))
+                  yield* disarmIdle(workspaceID)
                   return undefined
                 }
 
@@ -358,7 +385,7 @@ const layer = (options: Options) =>
                 })
                 yield* dropConnection(workspaceID)
                 yield* touch(workspaceID, lastActivity ?? row.last_used_at)
-                yield* kv.remove(idleKey(workspaceID))
+                yield* disarmIdle(workspaceID)
                 return workspaceID
               }).pipe(
                 Effect.catchCause((cause) =>
@@ -366,7 +393,7 @@ const layer = (options: Options) =>
                     ? Effect.interrupt
                     : Effect.logError("workspace idle suspension failed", cause).pipe(
                         // Back off so a broken/missing provider never spams retries on every poll or scheduled wake.
-                        Effect.andThen(kv.set(idleKey(workspaceID), now + idleThreshold)),
+                        Effect.andThen(armIdle(workspaceID, now + idleThreshold)),
                         Effect.as(undefined),
                       ),
                 ),
@@ -381,14 +408,25 @@ const layer = (options: Options) =>
       })
 
       // Re-arm any persisted idle deadlines at startup in case a prior schedule call failed or the isolate restarted.
+      yield* reconcile()
       yield* scheduleNextIdle()
 
       if (options.pollInterval !== null) {
-        yield* suspendIdle().pipe(
-          Effect.asVoid,
-          Effect.repeat(Schedule.spaced(options.pollInterval ?? Duration.minutes(1))),
-          Effect.forkScoped,
-        )
+        // Sleep to the earliest mirrored deadline, clamped to [1 s, 5 min]: the floor keeps a stale or past deadline from
+        // producing a zero-length sleep that never suspends, and the cap bounds the wait if an arm was missed.
+        yield* Effect.gen(function* () {
+          while (true) {
+            yield* suspendIdle()
+            const now = yield* Clock.currentTimeMillis
+            const earliest = earliestPending()
+            // Open connections need the regular poll (keepWarm closes them inside suspendIdle); with none, sleep to the next deadline.
+            const cap = connections.size > 0 ? Math.min(pollCap, pollMs) : pollCap
+            const ms = Math.min(cap, Math.max(pollFloor, earliest - now))
+            wake.at = now + ms
+            wake.signal = Deferred.makeUnsafe<void>()
+            yield* Effect.raceFirst(Effect.sleep(ms), Deferred.await(wake.signal))
+          }
+        }).pipe(Effect.forkScoped)
       }
 
       return Service.of({
@@ -468,7 +506,7 @@ const layer = (options: Options) =>
                 .where(eq(WorkspaceTable.id, workspaceID))
                 .run()
                 .pipe(Effect.orDie)
-              yield* kv.remove(idleKey(workspaceID))
+              yield* disarmIdle(workspaceID)
               yield* scheduleNextIdle()
               return workspaceID
             }),
@@ -504,7 +542,7 @@ const layer = (options: Options) =>
                     // Connection was detached by re-attach or destroy while this op ran: close only its own scope.
                     if (connections.get(workspaceID) !== connection) return yield* closeScope(connection.scope)
                     yield* touch(workspaceID, now)
-                    yield* kv.set(idleKey(workspaceID), now + idleThreshold)
+                    yield* armIdle(workspaceID, now + idleThreshold)
                     if (keepWarm === 0) yield* dropConnection(workspaceID)
                     yield* scheduleNextIdle()
                   }),
@@ -547,7 +585,7 @@ const layer = (options: Options) =>
                 ),
               )
               yield* db.delete(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).run().pipe(Effect.orDie)
-              yield* kv.remove(idleKey(workspaceID))
+              yield* disarmIdle(workspaceID)
               yield* scheduleNextIdle()
               return { destroyed: true }
             }),

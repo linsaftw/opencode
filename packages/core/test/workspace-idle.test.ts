@@ -128,6 +128,11 @@ describe("workspace idle probe", () => {
       )
       const expected = [...dueAt.values()].filter((at) => at <= t0 + Duration.toMillis(Duration.hours(1))).length
       expect(events.length).toBe(expected)
+      const dueOrder = [...dueAt.entries()]
+        .filter(([, at]) => at <= t0 + Duration.toMillis(Duration.hours(1)))
+        .sort((a, b) => a[1] - b[1])
+        .map(([id]) => id)
+      expect(events.map((event) => event.id)).toEqual(dueOrder)
     }),
   )
 })
