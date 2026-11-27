@@ -52,25 +52,6 @@ describe("State", () => {
     }),
   )
 
-  it.effect("runs transforms during every reload", () =>
-    Effect.gen(function* () {
-      let value = "first"
-      const state = State.create({
-        initial: () => ({ values: [] as string[] }),
-        editor: (editor) => ({ add: (item: string) => editor.values.push(item) }),
-      })
-
-      yield* state.transform((editor) => {
-        editor.add(value)
-      })
-      expect(state.get().values).toEqual(["first"])
-
-      value = "second"
-      yield* state.reload()
-      expect(state.get().values).toEqual(["second"])
-    }),
-  )
-
   it.effect("disposes a transform once and rebuilds remaining state", () =>
     Effect.gen(function* () {
       const state = State.create({
@@ -182,24 +163,34 @@ describe("State", () => {
     }),
   )
 
-  it.effect("notifies once per reload without waiting", () =>
+  it.effect("publishes the initial projection and skips unchanged reloads", () =>
     Effect.gen(function* () {
-      let finalized = 0
+      let notifications = 0
+      let label = "first"
       const state = State.create({
-        initial: () => ({ values: [] as string[] }),
-        editor: (editor) => ({ add: (item: string) => editor.values.push(item) }),
-        notify: () => Effect.sync(() => finalized++),
+        initial: () => ({ items: [] as { name: string; execute: () => void }[] }),
+        editor: (editor) => ({
+          add: (name: string) => editor.items.push({ name, execute: () => {} }),
+        }),
+        notify: State.changes(
+          (data) => data.items.map((item) => ({ name: item.name })),
+          () => Effect.sync(() => void notifications++),
+        ),
       })
-      yield* state.transform((editor) => {
-        editor.add("value")
-      })
-      finalized = 0
 
-      // Under TestClock nothing time-based can complete, so returning proves no debounce is involved.
+      yield* state.transform(() => {})
+      expect(notifications).toBe(1)
       yield* state.reload()
-      expect(finalized).toBe(1)
+      expect(notifications).toBe(1)
+
+      yield* state.transform((editor) => editor.add(label))
+      expect(notifications).toBe(2)
       yield* state.reload()
-      expect(finalized).toBe(2)
+      expect(notifications).toBe(2)
+
+      label = "second"
+      yield* state.reload()
+      expect(notifications).toBe(3)
     }),
   )
 })

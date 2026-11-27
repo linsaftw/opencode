@@ -9,6 +9,7 @@ import type {
   SessionMessageUser,
   SessionInboxInfo,
 } from "@opencode/client/promise"
+import { ClientError } from "@opencode/client/promise"
 import { Event } from "@opencode/schema/event"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { blockerStatus, pickBlockerView } from "./session-data"
@@ -390,6 +391,9 @@ const catalogEvents = new Set([
   "skill.updated",
   "reference.updated",
 ])
+
+// Bookkeeping rows (idle, switches, system) render nothing, so they don't count toward the replay limit.
+const replayedTypes = new Set<SessionMessageInfo["type"]>(["user", "assistant", "compaction", "skill", "shell"])
 
 // session.shell resolves after the command settled server-side; the matching
 // live shell.ended event usually lands within the same tick, but hold the turn
@@ -898,16 +902,44 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     }
   }
 
-  const projectedMessages = async (client: OpenCodeClient, signal: AbortSignal) =>
-    (
-      await client.message.list(
-        { sessionID: input.sessionID, limit: input.replayLimit ?? 200, order: "desc" },
+  const projectedMessages = async (client: OpenCodeClient, signal: AbortSignal) => {
+    const limit = input.replayLimit ?? 200
+    const listed: SessionMessageInfo[] = []
+    let cursor: string | undefined
+    while (true) {
+      const size = Math.min(limit - listed.length, 200)
+      const page = await client.message.list(
+        cursor
+          ? { sessionID: input.sessionID, limit: size, cursor }
+          : { sessionID: input.sessionID, limit: size, order: "desc" },
         { signal },
       )
-    ).data.toReversed()
+      listed.push(...page.data.filter((message) => replayedTypes.has(message.type)))
+      if (listed.length >= limit || page.data.length < size || !page.cursor.next) return listed.toReversed()
+      cursor = page.cursor.next
+    }
+  }
 
-  const settleSession = async (client: OpenCodeClient) => {
-    await client.session.wait({ sessionID: input.sessionID }, { signal: controller.signal })
+  const waitForSession = async (initial: OpenCodeClient) => {
+    let client = initial
+    while (true) {
+      try {
+        await client.experimental.session.wait({ sessionID: input.sessionID }, { signal: controller.signal })
+        return client
+      } catch (error) {
+        // session.wait is a long poll that only answers once the session settles, so a dropped
+        // connection or a client-side request deadline ends this waiter, not the session.
+        if (controller.signal.aborted || !(error instanceof ClientError) || error.reason !== "Transport") throw error
+        input.trace?.write("recv.wait.retry", { error: formatUnknownError(error) })
+        await wait(250, controller.signal)
+        await waitUntilConnected()
+        client = sdk
+      }
+    }
+  }
+
+  const settleSession = async (initial: OpenCodeClient) => {
+    const client = await waitForSession(initial)
     for (const message of await projectedMessages(client, controller.signal)) renderMessage(message, true)
     paintIdle(blockerStatus(state.view))
     await input.footer.idle()
@@ -1279,7 +1311,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
         id: event.data.id,
         name: current?.part.name ?? "tool",
         executed: event.data.executed,
-        providerState: event.data.state,
+        native: event.data.native,
         state: { status: "running", input: event.data.input, metadata: {} },
         time: { created: current?.part.time.created ?? event.created, ran: event.created },
       }
@@ -1296,7 +1328,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
         id: event.data.id,
         name: part?.name ?? "tool",
         executed: part?.executed,
-        providerState: part?.providerState,
+        native: part?.native,
         state: {
           status: "running",
           input: part && part.state.status !== "streaming" ? part.state.input : {},
@@ -1315,8 +1347,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
         id: event.data.id,
         name: part?.name ?? "tool",
         executed: event.data.executed,
-        providerState: part?.providerState,
-        providerResultState: event.data.resultState,
+        native: event.data.native ? { ...part?.native, ...event.data.native } : part?.native,
         state: failed
           ? {
               status: "error",

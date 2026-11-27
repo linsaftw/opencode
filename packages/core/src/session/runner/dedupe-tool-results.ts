@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto"
-import { Message } from "@opencode/ai"
+import type { Message } from "@opencode/ai"
 
 /** Request-only deduplication: persisted tool outputs and the latest observation stay intact. */
-export const dedupe = (messages: readonly Message[]): Message[] => {
+export const dedupe = <T extends Message>(messages: readonly T[]): T[] => {
   if (process.env.OPENCODE_TOKEN_ECONOMY === "0") return [...messages]
   const seen = new Map<string, string>()
   const output = [...messages]
@@ -23,7 +23,7 @@ export const dedupe = (messages: readonly Message[]): Message[] => {
       return { ...part, result: { type: "text" as const, value: `[Identical ${part.name} output omitted; see later tool result ${latest}.]` } }
     })
     if (content.some((part, i) => part !== message.content[i]))
-      output[index] = new Message({ ...message, content })
+      output[index] = { ...message, content }
   }
   return output
 }

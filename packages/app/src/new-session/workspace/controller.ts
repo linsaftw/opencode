@@ -1,4 +1,3 @@
-import { debounce } from "@solid-primitives/scheduled"
 import { createEffect, createMemo, createResource, onCleanup } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useWorkspaceLocation } from "@/workspaces/location"
@@ -14,9 +13,19 @@ import {
   isWorkspaceSelection,
   workspaceDefaultSelection,
   workspaceSelectionDestination,
+  workspaceSelectionDirectories,
 } from "@/workspaces/paths"
 
-export function resolveNewSessionWorktree(input: { enabled: boolean; selected?: string; fallback?: string }) {
+export function resolveNewSessionWorktree(input: {
+  enabled: boolean
+  selected?: string
+  directory?: string
+  fallback?: string
+}) {
+  // An explicitly placed draft (for example from an automation) can start in a subdirectory,
+  // including a non-Git folder. Its initial destination is not the user's default worktree.
+  if (input.selected && input.directory && sameDirectory(input.selected, input.directory)) return input.directory
+
   if (!input.enabled) return "main"
 
   if (input.selected) return input.selected
@@ -24,16 +33,19 @@ export function resolveNewSessionWorktree(input: { enabled: boolean; selected?: 
   return input.fallback ?? "main"
 }
 
+function checkoutDirectory(worktree: string, root: string) {
+  return worktree === "main" || worktree === "create" ? root : worktree
+}
+
 export function resolveNewSessionBranch(input: {
   worktree: string
-  directory: string
+  root: string
   createBranch?: string
   worktreeBranch: (worktree: string) => string | undefined
 }) {
   if (input.worktree === "create" && input.createBranch) return input.createBranch
-  const directory = input.worktree === "main" || input.worktree === "create" ? input.directory : input.worktree
 
-  return input.worktreeBranch(directory)
+  return input.worktreeBranch(checkoutDirectory(input.worktree, input.root))
 }
 
 export function resolveNewSessionGit(input: { projectVcs?: string; branch?: string }) {
@@ -53,7 +65,6 @@ export function createNewSessionWorkspaceController(input: {
   selectedBranch: () => string | undefined
   setSelectedWorktree: (worktree: string | undefined) => void
   setSelectedBranch: (branch: string | undefined) => void
-  onViewAll: () => void
 }) {
   const sdk = useWorkspaceLocation()
   const serverSDK = useServerSDK()
@@ -61,12 +72,7 @@ export function createNewSessionWorkspaceController(input: {
   const settings = useSettings()
   const tabs = useTabs()
 
-  const [state, setState] = createStore({
-    search: "",
-    existing: undefined as { projectID: string; directory: string } | undefined,
-  })
-
-  const searchBranches = debounce((search: string) => setState("search", search.trim()), 100)
+  const [state, setState] = createStore<{ existing?: { projectID: string; directory: string } }>({})
 
   const currentProject = createMemo(() => {
     const projectID = data.location.info({ directory: sdk().directory })?.project.id
@@ -119,15 +125,7 @@ export function createNewSessionWorkspaceController(input: {
 
     if (!project) return []
 
-    const directories = [
-      ...worktreeItems().map((item) => item.directory),
-      ...project.worktrees.map((item) => item.directory),
-      ...(project.sandboxes ?? []),
-    ]
-
-    return directories
-      .filter((directory) => !sameDirectory(project.worktree, directory))
-      .filter((directory, index, items) => items.findIndex((item) => sameDirectory(item, directory)) === index)
+    return workspaceSelectionDirectories(project, worktreeItems())
   })
 
   const managedWorktrees = createMemo(() => {
@@ -151,7 +149,11 @@ export function createNewSessionWorkspaceController(input: {
     const project = currentProject()
     const worktree = input.selectedWorktree()
 
-    if (!project || !worktree) return
+    if (!worktree) return
+
+    if (sameDirectory(worktree, sdk().directory)) return worktree
+
+    if (!project) return
 
     if (isWorkspaceSelection(project, worktree)) return worktree
 
@@ -176,20 +178,18 @@ export function createNewSessionWorkspaceController(input: {
   const value = createMemo(() =>
     resolveNewSessionWorktree({
       enabled: visible(),
+      directory: sdk().directory,
       selected: selected(),
       fallback: fallback(),
     }),
   )
 
-  const projectRoot = createMemo(() => currentProject()?.worktree ?? sdk().directory)
-
-  const [branches] = createResource(
-    () => (visible() ? { directory: projectRoot(), search: state.search } : undefined),
-    ({ directory, search }) =>
-      serverSDK.api.vcs
-        .branch.list({ location: { directory }, search, limit: 50 })
-        .then((response) => ({ directory, search, data: response.data }))
-        .catch(() => ({ directory, search, data: [] })),
+  // A draft opened from a worktree session keeps that worktree as its directory; Local still runs in the main checkout.
+  const projectRoot = createMemo(
+    () =>
+      data.location.info({ directory: sdk().directory })?.project.canonical ??
+      currentProject()?.worktree ??
+      sdk().directory,
   )
 
   createEffect(() => {
@@ -198,6 +198,10 @@ export function createNewSessionWorkspaceController(input: {
       data.project.sync(),
       data.location.vcs.sync({ directory: sdk().directory }),
     ]).catch(() => undefined)
+  })
+  createEffect(() => {
+    if ((value() !== "main" && value() !== "create") || sameDirectory(projectRoot(), sdk().directory)) return
+    void data.location.vcs.sync({ directory: projectRoot() }).catch(() => undefined)
   })
   // Only the selected worktree feeds the branch label. Syncing every worktree in the inventory boots
   // each one on the server, which then emits `agent.updated` and makes the client run the full
@@ -215,11 +219,18 @@ export function createNewSessionWorkspaceController(input: {
   const branch = createMemo(() =>
     resolveNewSessionBranch({
       worktree: value(),
-      directory: sdk().directory,
+      root: projectRoot(),
       createBranch: input.selectedBranch(),
       worktreeBranch: (worktree) => data.location.vcs.info({ directory: worktree })?.branch.current,
     }),
   )
+
+  // A missing checkout is loading; a loaded checkout may have a detached HEAD.
+  const checkout = createMemo(() => {
+    const info = data.location.vcs.info({ directory: checkoutDirectory(value(), projectRoot()) })
+
+    return info ? { branch: info.branch.current } : undefined
+  })
 
   const remember = (worktree = value()) => {
     const project = currentProject()
@@ -231,7 +242,7 @@ export function createNewSessionWorkspaceController(input: {
   }
 
   const select = (worktree: string) => {
-    input.setSelectedBranch(undefined)
+    if (worktree !== "create" || value() !== "create") input.setSelectedBranch(undefined)
     input.setSelectedWorktree(worktree)
     remember(worktree)
   }
@@ -270,37 +281,24 @@ export function createNewSessionWorkspaceController(input: {
       },
       remember,
       set: select,
+      branch: (branch: string) => input.setSelectedBranch(branch),
       cycle: () => select(cycleNewSessionWorktree({ current: value(), existing: existing() })),
-      create: (branch: string) => {
-        input.setSelectedBranch(branch)
-        input.setSelectedWorktree("create")
-        remember("create")
-      },
     },
     project: {
       root: projectRoot,
       workspaces: worktreeDirectories,
       managed: managedWorktrees,
       git: visible,
-      branches: () => {
-        const current = data.location.vcs.info({ directory: sdk().directory })?.branch.current
-        const loaded = branches.latest
-        const list = loaded?.directory === projectRoot() ? loaded.data : []
-
-        return [
-          ...new Set([
-            ...list,
-            ...(current && current.toLowerCase().includes(state.search.toLowerCase()) ? [current] : []),
-          ]),
-        ].slice(0, 50)
-      },
-      searchBranches,
-      openAll: input.onViewAll,
     },
     bar: {
       visible,
       branch,
+      checkout,
     },
+    branches: (search: string, signal?: AbortSignal) =>
+      serverSDK.api.vcs.branch
+        .list({ location: { directory: projectRoot() }, search, limit: 50 }, { signal })
+        .then((response) => response.data),
   }
 }
 

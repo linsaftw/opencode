@@ -5,17 +5,19 @@ import { Cause, Context, Effect, FiberSet, Layer, Schema, Semaphore, Stream } fr
 import type { VcsDefinition, VcsEditor } from "@opencode/plugin/effect/vcs"
 import { FileDiff } from "@opencode/schema/file-diff"
 import { FileSystem } from "@opencode/schema/filesystem"
-import { Base, BranchList, FileStatus, Info, Mode } from "@opencode/schema/vcs"
+import { Base, BranchList, FileStatus, Info, Mode, Untracked } from "@opencode/schema/vcs"
 import { VcsEvent } from "@opencode/schema/vcs-event"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
+import { Environment } from "./environment/index.js"
+import { EnvironmentUnavailable } from "./environment/unavailable.js"
 import { Location } from "./location.js"
 import { Project } from "./project.js"
 import { Bus } from "./bus.js"
 import { State } from "./state.js"
 import { emptyPatch, MAX_TOTAL_PATCH_BYTES, PATCH_CONTEXT_LINES } from "./vcs/patch.js"
 
-export { Base, BranchList, FileStatus, Info, Mode }
+export { Base, BranchList, FileStatus, Info, Mode, Untracked }
 
 export class DiffError extends Schema.TaggedError<DiffError>()("Vcs.DiffError", {
   message: Schema.String,
@@ -28,6 +30,7 @@ export class InitializeError extends Schema.TaggedError<InitializeError>()("Vcs.
 export interface DiffOptions {
   readonly context?: number
   readonly base?: string
+  readonly untracked?: Untracked
 }
 
 export interface BranchOptions {
@@ -58,6 +61,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Vc
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
+    const environment = yield* Environment.Service
     const fs = yield* FSUtil.Service
     const location = yield* Location.Service
     const bus = yield* Bus.Service
@@ -150,7 +154,7 @@ const layer = Layer.effect(
       }
     })
 
-    if (vcs) {
+    if (vcs && environment.local) {
       const store = yield* fs.realPath(vcs.store).pipe(Effect.orElseSucceed(() => vcs.store))
       const isBranchMetadata =
         vcs.type === "git"
@@ -175,8 +179,24 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       initialize: Effect.fn("Vcs.initialize")(function* (providerID: string) {
-        if (!(yield* fs.isDir(location.project.directory))) return yield* new InitializeError({ kind: "missing" })
-        if (yield* Project.root(fs, location.project.directory)) return yield* new InitializeError({ kind: "conflict" })
+        if (environment.spawner === EnvironmentUnavailable.spawner)
+          return yield* new InitializeError({ kind: "unsupported" })
+        const type = yield* Environment.typeFollowing(environment.files, location.project.directory).pipe(
+          Effect.catchTags({
+            "Environment.NotFound": () => Effect.undefined,
+            "Environment.Failed": () => Effect.fail(new InitializeError({ kind: "failed" })),
+          }),
+        )
+        if (type !== "directory") return yield* new InitializeError({ kind: "missing" })
+        if (
+          yield* Project.root(
+            { exists: (target) => Environment.exists(environment.files, target) },
+            location.project.directory,
+            undefined,
+            environment.path,
+          )
+        )
+          return yield* new InitializeError({ kind: "conflict" })
         const provider = state.get().providers.get(providerID)
         if (!provider) return yield* new InitializeError({ kind: "unknown" })
         if (!provider.init) return yield* new InitializeError({ kind: "unsupported" })
@@ -236,6 +256,7 @@ const layer = Layer.effect(
               ...scope,
               mode,
               ...(options?.base !== undefined ? { base: options.base } : {}),
+              ...(options?.untracked !== undefined ? { untracked: options.untracked } : {}),
               context: options?.context ?? PATCH_CONTEXT_LINES,
               maxOutputBytes: MAX_TOTAL_PATCH_BYTES,
             })
@@ -256,5 +277,5 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Location.node, Bus.node],
+  deps: [Environment.node, FSUtil.node, Location.node, Bus.node],
 })

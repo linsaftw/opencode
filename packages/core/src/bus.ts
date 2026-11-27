@@ -10,8 +10,10 @@ import type { Location } from "@opencode/schema/location"
 import { KeyedMutex } from "./effect/keyed-mutex.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { isDeepStrictEqual } from "node:util"
+import { isSqlError } from "effect/sql/SqlError"
 import { Durable } from "@opencode/schema/durable-event-manifest"
 import { SessionEvent } from "@opencode/schema/session-event"
+import { SessionLegacy } from "@opencode/schema/session-legacy"
 import type { SessionID } from "@opencode/schema/session-id"
 import { AbsolutePath } from "@opencode/schema/schema"
 
@@ -70,6 +72,16 @@ const envelope = (aggregateID: string, seq: number, version: number) => ({
   version: Event.Version.make(version),
 })
 
+const requireAggregateID = (type: string, aggregate: string, data: unknown) => {
+  const aggregateID = (data as Record<string, unknown>)[aggregate]
+  if (typeof aggregateID === "string") return Effect.succeed(aggregateID)
+  return Effect.die(new InvalidDurableEventError({ type, message: `Expected string aggregate field ${aggregate}` }))
+}
+
+// Every stored event decodes through here, so payloads written in older shapes are upgraded in one place.
+const decodeStoredData = (definition: Event.DurableDefinition, data: unknown) =>
+  Schema.decodeUnknownSync(definition.data)(SessionLegacy.event(definition.type, data))
+
 const decodeSerializedEvent = (event: SerializedEvent): Event.Payload => {
   const definition = Durable.get(event.type)
   if (!definition?.durable) {
@@ -80,7 +92,7 @@ const decodeSerializedEvent = (event: SerializedEvent): Event.Payload => {
     created: event.created ?? 0,
     type: definition.type,
     durable: envelope(event.aggregateID, event.seq, definition.durable.version),
-    data: Schema.decodeUnknownSync(definition.data)(event.data),
+    data: decodeStoredData(definition, event.data),
   }
 }
 
@@ -88,24 +100,37 @@ export const versionedType = Event.versionedType
 export const durable = Event.durable
 export const ephemeral = Event.ephemeral
 
-export interface PublishOptions {
+export interface PublishOptions<E = never> {
   readonly id?: Event.ID
   readonly metadata?: Record<string, unknown>
   readonly location?: Location.Ref
   readonly global?: boolean
-  /** Local operational projection committed atomically with a new durable event. Not replayed or serialized. */
-  readonly commit?: (seq: number) => Effect.Effect<void>
+  /**
+   * Local operational projection committed atomically with a new durable event. Not replayed or serialized.
+   * A failure rolls back the transaction, publishes nothing and surfaces from `publish`.
+   */
+  readonly commit?: (seq: number) => Effect.Effect<void, E>
 }
 
-export type PublishInput<D extends Event.DurableDefinition = Event.DurableDefinition> = readonly [
+export type PublishInput<D extends Event.DurableDefinition = Event.DurableDefinition, E = never> = readonly [
   definition: D,
   data: Event.Data<D>,
-  options?: PublishOptions,
+  options?: PublishOptions<E>,
 ]
 
-export type PublishResult<I extends readonly PublishInput[]> = {
-  readonly [K in keyof I]: I[K] extends PublishInput<infer D> ? Event.Payload<D> : never
+type AnyPublishInput = PublishInput<Event.DurableDefinition, unknown>
+
+export type PublishResult<I extends readonly AnyPublishInput[]> = {
+  readonly [K in keyof I]: I[K] extends PublishInput<infer D, unknown> ? Event.Payload<D> : never
 }
+
+export type PublishError<I extends readonly AnyPublishInput[]> = I[number][2] extends infer O
+  ? O extends { readonly commit?: infer C }
+    ? C extends (seq: number) => Effect.Effect<void, infer E>
+      ? E
+      : never
+    : never
+  : never
 
 /** Marker/event union emitted by `log`. */
 export type LogItem = Event.Payload | EventLog.Synced
@@ -137,14 +162,14 @@ const isDefinition = (input: Event.Definition | readonly Event.Definition[]): in
   !Array.isArray(input)
 
 export interface Interface {
-  readonly publish: <D extends Event.Definition>(
+  readonly publish: <D extends Event.Definition, E = never>(
     definition: D,
     data: Event.Data<D>,
-    options?: PublishOptions,
-  ) => Effect.Effect<Event.Payload<D>>
-  readonly publishAll: <const I extends readonly [PublishInput, ...PublishInput[]]>(
+    options?: PublishOptions<E>,
+  ) => Effect.Effect<Event.Payload<D>, E>
+  readonly publishAll: <const I extends readonly [AnyPublishInput, ...AnyPublishInput[]]>(
     events: I,
-  ) => Effect.Effect<PublishResult<I>>
+  ) => Effect.Effect<PublishResult<I>, PublishError<I>>
   readonly subscribe: Subscribe
   /**
    * Durable, ordered per-aggregate log read. Forked aggregates may reserve an
@@ -193,7 +218,7 @@ export function configured(options?: Options) {
         const pubsub = {
           live: yield* PubSub.unbounded<Event.Payload>(),
           durable: new Map<string, Set<PubSub.PubSub<void>>>(),
-          typed: new Map<string, PubSub.PubSub<Event.Payload>>(),
+          typed: new Map<string, Set<PubSub.PubSub<Event.Payload>>>(),
         }
         const projectors = new Map<string, Subscriber[]>()
         const listeners = new Array<Subscriber>()
@@ -260,15 +285,6 @@ export function configured(options?: Options) {
           }
         })
 
-        const getOrCreate = (definition: Event.Definition) =>
-          Effect.gen(function* () {
-            const existing = pubsub.typed.get(definition.type)
-            if (existing) return existing
-            const created = yield* PubSub.unbounded<Event.Payload>()
-            pubsub.typed.set(definition.type, created)
-            return created
-          })
-
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             yield* PubSub.shutdown(pubsub.live)
@@ -277,11 +293,15 @@ export function configured(options?: Options) {
               (pubsubs) => Effect.forEach(pubsubs, PubSub.shutdown, { discard: true }),
               { discard: true },
             )
-            yield* Effect.forEach(pubsub.typed.values(), PubSub.shutdown, { discard: true })
+            yield* Effect.forEach(
+              pubsub.typed.values(),
+              (subscribers) => Effect.forEach(subscribers, PubSub.shutdown, { discard: true }),
+              { discard: true },
+            )
           }),
         )
 
-        function commitDurableEvent(
+        function commitDurableEvent<E = never>(
           definition: Event.Definition,
           event: Event.Payload,
           input?: {
@@ -290,19 +310,12 @@ export function configured(options?: Options) {
             readonly ownerID?: string
             readonly strictOwner?: boolean
           },
-          commit?: (seq: number) => Effect.Effect<void>,
+          commit?: (seq: number) => Effect.Effect<void, E>,
         ) {
           return Effect.gen(function* () {
             const durable = definition.durable
             if (!durable) return yield* Effect.void
-            const aggregateID = (event.data as Record<string, unknown>)[durable.aggregate]
-            if (typeof aggregateID !== "string")
-              return yield* Effect.die(
-                new InvalidDurableEventError({
-                  type: event.type,
-                  message: `Expected string aggregate field ${durable.aggregate}`,
-                }),
-              )
+            const aggregateID = yield* requireAggregateID(event.type, durable.aggregate, event.data)
             if (input && input.aggregateID !== aggregateID) {
               yield* Effect.die(
                 new InvalidDurableEventError({
@@ -325,7 +338,8 @@ export function configured(options?: Options) {
                           .get()
                           .pipe(Effect.orDie)
                         const latest = row?.seq ?? -1
-                        const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
+                        const encode = () =>
+                          Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
                         if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
                           yield* Effect.die(
                             new InvalidDurableEventError({
@@ -346,7 +360,8 @@ export function configured(options?: Options) {
                             stored?.id === event.id &&
                             stored.type === versionedType(definition.type, durable.version) &&
                             stored.created === (event.created ?? 0) &&
-                            isDeepStrictEqual(stored.data, encoded)
+                            // Rows written before a payload rename compare in their upgraded shape.
+                            isDeepStrictEqual(SessionLegacy.event(definition.type, stored.data), encode())
                           ) {
                             if (input.ownerID && row?.ownerID == null) {
                               yield* db
@@ -423,7 +438,7 @@ export function configured(options?: Options) {
                                 seq,
                                 created: event.created ?? 0,
                                 type: versionedType(definition.type, durable.version),
-                                data: encoded,
+                                data: encode(),
                               },
                             ])
                             .run()
@@ -432,7 +447,7 @@ export function configured(options?: Options) {
                       }),
                     { behavior: "immediate" },
                   )
-                  .pipe(Effect.orDie)
+                  .pipe(Effect.catchIf(isSqlError, Effect.die))
                 if (committed) {
                   committed.route()
                   yield* Effect.forEach(
@@ -447,10 +462,10 @@ export function configured(options?: Options) {
           })
         }
 
-        function publishEvent<D extends Event.Definition>(
+        function publishEvent<D extends Event.Definition, E>(
           definition: D,
           event: Event.Payload<D>,
-          commit?: PublishOptions["commit"],
+          commit?: PublishOptions<E>["commit"],
         ) {
           return Effect.gen(function* () {
             if (!definition.durable && commit)
@@ -498,14 +513,20 @@ export function configured(options?: Options) {
               (listener) => (isolateListeners ? observe(event, listener) : listener(event)),
               { discard: true },
             )
-            const typed = pubsub.typed.get(event.type)
-            if (typed) yield* PubSub.publish(typed, event)
+            // Type subscribers resume inline and may publish follow-up events, so live subscribers get this one first.
             yield* PubSub.publish(pubsub.live, event)
+            const typed = pubsub.typed.get(event.type)
+            if (typed)
+              yield* Effect.forEach(typed, (subscriber) => PubSub.publish(subscriber, event), { discard: true })
           })
         }
 
-        function publish<D extends Event.Definition>(definition: D, data: Event.Data<D>, options?: PublishOptions) {
-          return Effect.gen(function* () {
+        const makePayload = (
+          definition: Event.Definition,
+          data: unknown,
+          options: PublishOptions<unknown> | undefined,
+        ) =>
+          Effect.gen(function* () {
             const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
             const location = options?.global
               ? undefined
@@ -513,53 +534,38 @@ export function configured(options?: Options) {
                 (serviceLocation
                   ? { directory: serviceLocation.directory, workspaceID: serviceLocation.workspaceID }
                   : undefined))
-            return yield* publishEvent(
-              definition,
-              {
-                id: options?.id ?? Event.ID.create(),
-                created: yield* Clock.currentTimeMillis,
-                ...(options?.metadata ? { metadata: options.metadata } : {}),
-                type: definition.type,
-                ...(location ? { location } : {}),
-                data,
-              } as Event.Payload<D>,
-              options?.commit,
-            )
+            return {
+              id: options?.id ?? Event.ID.create(),
+              created: yield* Clock.currentTimeMillis,
+              ...(options?.metadata ? { metadata: options.metadata } : {}),
+              type: definition.type,
+              ...(location ? { location } : {}),
+              data,
+            } as Event.Payload
+          })
+
+        function publish<D extends Event.Definition, E = never>(
+          definition: D,
+          data: Event.Data<D>,
+          options?: PublishOptions<E>,
+        ) {
+          return Effect.gen(function* () {
+            const event = (yield* makePayload(definition, data, options)) as Event.Payload<D>
+            return yield* publishEvent(definition, event, options?.commit)
           })
         }
 
-        function publishAll<const I extends readonly [PublishInput, ...PublishInput[]]>(events: I) {
+        function publishAll<const I extends readonly [AnyPublishInput, ...AnyPublishInput[]]>(events: I) {
           return Effect.gen(function* () {
-            const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
             const payloads = yield* Effect.forEach(events, ([definition, data, options]) =>
               Effect.gen(function* () {
-                const aggregateID = (data as Record<string, unknown>)[definition.durable.aggregate]
-                if (typeof aggregateID !== "string") {
-                  return yield* Effect.die(
-                    new InvalidDurableEventError({
-                      type: definition.type,
-                      message: `Expected string aggregate field ${definition.durable.aggregate}`,
-                    }),
-                  )
-                }
-                const location = options?.global
-                  ? undefined
-                  : (options?.location ??
-                    (serviceLocation
-                      ? { directory: serviceLocation.directory, workspaceID: serviceLocation.workspaceID }
-                      : undefined))
+                const aggregateID = yield* requireAggregateID(definition.type, definition.durable.aggregate, data)
                 return {
                   definition,
                   aggregateID,
-                  commit: options?.commit,
-                  event: {
-                    id: options?.id ?? Event.ID.create(),
-                    created: yield* Clock.currentTimeMillis,
-                    ...(options?.metadata ? { metadata: options.metadata } : {}),
-                    type: definition.type,
-                    ...(location ? { location } : {}),
-                    data,
-                  } as Event.Payload,
+                  // The tuple's own commit types are what PublishError<I> reads; the loop erases them to unknown.
+                  commit: options?.commit as PublishOptions<PublishError<I>>["commit"],
+                  event: yield* makePayload(definition, data, options),
                 }
               }),
             )
@@ -596,10 +602,6 @@ export function configured(options?: Options) {
                           const ids = new Set<Event.ID>()
                           for (const [index, item] of payloads.entries()) {
                             const seq = firstSeq + index
-                            const encoded = Schema.encodeUnknownSync(item.definition.data)(item.event.data) as Record<
-                              string,
-                              unknown
-                            >
                             if (persist) {
                               if (ids.has(item.event.id))
                                 yield* Effect.die(
@@ -637,7 +639,10 @@ export function configured(options?: Options) {
                                 seq,
                                 created: event.created,
                                 type: versionedType(item.definition.type, item.definition.durable.version),
-                                data: encoded,
+                                data: Schema.encodeUnknownSync(item.definition.data)(item.event.data) as Record<
+                                  string,
+                                  unknown
+                                >,
                               })
                           }
                           yield* db
@@ -651,7 +656,7 @@ export function configured(options?: Options) {
                         }),
                       { behavior: "immediate" },
                     )
-                    .pipe(Effect.orDie)
+                    .pipe(Effect.catchIf(isSqlError, Effect.die))
                   committed.route()
                   yield* Effect.forEach(
                     pubsub.durable.get(aggregateID) ?? [],
@@ -684,7 +689,7 @@ export function configured(options?: Options) {
                   id: event.id,
                   created: event.created ?? 0,
                   type: definition.type,
-                  data: Schema.decodeUnknownSync(definition.data)(event.data),
+                  data: decodeStoredData(definition, event.data),
                 } as Event.Payload
                 const committed = yield* commitDurableEvent(definition, payload, {
                   seq: event.seq,
@@ -752,11 +757,30 @@ export function configured(options?: Options) {
         ): Stream.Stream<SubscribePayload<D>>
         function subscribe(input?: Event.Definition | readonly Event.Definition[]): Stream.Stream<Event.Payload> {
           if (input === undefined) return streamLive()
-          if (isDefinition(input)) {
-            return local(Stream.unwrap(getOrCreate(input).pipe(Effect.map((pubsub) => Stream.fromPubSub(pubsub)))))
-          }
-          const types = new Set(input.map((definition) => definition.type))
-          return streamLive().pipe(Stream.filter((event) => types.has(event.type)))
+          const types = new Set((isDefinition(input) ? [input] : input).map((definition) => definition.type))
+          // One PubSub per subscription, registered under each type, keeps publish order across types.
+          return local(
+            Stream.unwrap(
+              Effect.acquireRelease(
+                PubSub.unbounded<Event.Payload>().pipe(
+                  Effect.tap((subscriber) =>
+                    Effect.sync(() => {
+                      for (const type of types)
+                        pubsub.typed.set(type, (pubsub.typed.get(type) ?? new Set()).add(subscriber))
+                    }),
+                  ),
+                ),
+                (subscriber) =>
+                  Effect.sync(() => {
+                    for (const type of types) {
+                      const subscribers = pubsub.typed.get(type)
+                      subscribers?.delete(subscriber)
+                      if (subscribers?.size === 0) pubsub.typed.delete(type)
+                    }
+                  }).pipe(Effect.andThen(PubSub.shutdown(subscriber))),
+              ).pipe(Effect.flatMap(PubSub.subscribe), Effect.map(Stream.fromSubscription)),
+            ),
+          )
         }
 
         const streamLive = (): Stream.Stream<Event.Payload> => local(Stream.fromPubSub(pubsub.live))

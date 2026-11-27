@@ -4,21 +4,36 @@ import { Model } from "../model.js"
 import { Permission } from "../permission.js"
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "../agent.js"
+import type { SessionRequestKind } from "@opencode/plugin/effect/session"
+import { CodeModeAgents } from "../codemode/agents.js"
+import { CodeModeApi } from "../codemode/api.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
+import { CodeModeTool } from "../codemode/tool.js"
 import { Database } from "../database/database.js"
+import { Environment } from "../environment/index.js"
+import { FileAccess } from "../file-access.js"
+import { FileMutation } from "../file-mutation.js"
+import { FileWrite } from "../file-write.js"
+import { Flag } from "../flag.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { InstructionDiscovery } from "../instruction-discovery.js"
 import { Instructions } from "../instructions/index.js"
+import { AgentInstructions } from "../instructions/agent.js"
 import { InstructionBuiltIns } from "../instructions/builtins.js"
 import { Location } from "../location.js"
+import { MachineInstructions } from "../machine/instructions.js"
+import { Environments } from "../environment/environments.js"
 import { McpInstructions } from "../mcp/instructions.js"
 import { McpTool } from "../tool/mcp.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
 import { SkillInstructions } from "../skill/instructions.js"
 import { Tool } from "../tool.js"
+import { modelTools } from "../tool/model-policy.js"
+import { WebSearch } from "../websearch.js"
+import { SessionCwd } from "./cwd.js"
+import { SessionCwdInstructions } from "./cwd-instructions.js"
 import { AgentNotFoundError } from "./error.js"
 import { SessionHistory } from "./history.js"
-import { SessionProviderContext } from "./provider-context.js"
 import { InstructionEntry } from "./instruction-entry.js"
 import { SessionMessage } from "./message.js"
 import { SessionModelRequest } from "./model-request.js"
@@ -37,7 +52,7 @@ export interface Loaded {
   readonly session: SessionSchema.Info
   readonly agent: Agent.Selection & { readonly info: Agent.Info }
   readonly model: SessionRunnerModel.Resolved
-  readonly initial: string
+  readonly initial: ReadonlyArray<Instructions.Rendered>
   readonly messages: ReadonlyArray<SessionMessage.Info>
   readonly tools: Tool.Snapshot
 }
@@ -55,6 +70,7 @@ export interface Interface {
   readonly load: (selection: Selection) => Effect.Effect<Loaded, SessionRunnerModel.Error>
   readonly resolveModel: (
     session: SessionSchema.Info,
+    request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
   ) => Effect.Effect<SessionRunnerModel.Resolved, SessionRunnerModel.Error>
   /** Selects auxiliary title capabilities without instruction or tool preflight. */
   readonly selectTitle: (session: SessionSchema.Info) => Effect.Effect<
@@ -80,7 +96,12 @@ const layer = Layer.effect(
     const db = (yield* Database.Service).db
     const discovery = yield* InstructionDiscovery.Service
     const entries = yield* InstructionEntry.Service
+    const flags = yield* Flag.Service
+    const environment = yield* Environment.Service
     const location = yield* Location.Service
+    const sessionCwd = yield* SessionCwd.make
+    const cwdInstructions = yield* SessionCwdInstructions.Service
+    const machineInstructions = yield* MachineInstructions.Service
     const mcpInstructions = yield* McpInstructions.Service
     const mcpTools = yield* McpTool.Service
     const models = yield* SessionRunnerModel.Service
@@ -89,30 +110,48 @@ const layer = Layer.effect(
     const skillInstructions = yield* SkillInstructions.Service
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
+    const services = yield* CodeModeTool.services
+    const api = yield* CodeModeApi.Service
+    const agentRunner = yield* CodeModeAgents.Service
+    const websearch = yield* WebSearch.Service
 
-    const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
+    const resolveModel = (
+      session: SessionSchema.Info,
+      request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
+    ) => models.resolve(session, model.available, request)
 
     const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
       const agent = yield* agents.get(Agent.ID.make("title"))
       if (!agent) return
-      const primary = yield* resolveModel(session).pipe(Effect.orElseSucceed(() => undefined))
-      const info = yield* Effect.gen(function* () {
-        if (agent.model) return yield* model.get(agent.model.providerID, agent.model.id)
+      const primary = yield* resolveModel(session, { kind: "title", agent: agent.id }).pipe(
+        Effect.orElseSucceed(() => undefined),
+      )
+      const candidate = yield* Effect.gen(function* () {
+        if (agent.model) {
+          const info = yield* model.get(agent.model.providerID, agent.model.id)
+          return info && { info, variant: agent.model.variant ?? minimalVariant(info) }
+        }
         if (!primary) return
-        return yield* model.small(primary.ref.providerID)
+        const small = yield* model.small(primary.ref.providerID)
+        if (small) return { info: small, variant: minimalVariant(small) }
+        // Without a lower variant, the primary model at its selected variant is already the fallback.
+        const info = yield* model.get(primary.ref.providerID, primary.ref.id)
+        const variant = info && lowerVariant(info, primary.ref.variant)
+        return variant && { info, variant }
       })
-      const variant =
-        agent.model?.variant ?? MINIMAL_REASONING_VARIANTS.find((id) => info?.variants.some((item) => item.id === id))
       const preferred =
-        info &&
-        (yield* resolveModel({
-          ...session,
-          model: Model.Ref.make({
-            providerID: info.providerID,
-            id: info.id,
-            ...(variant ? { variant } : {}),
-          }),
-        }).pipe(Effect.orElseSucceed(() => undefined)))
+        candidate &&
+        (yield* resolveModel(
+          {
+            ...session,
+            model: Model.Ref.make({
+              providerID: candidate.info.providerID,
+              id: candidate.info.id,
+              ...(candidate.variant ? { variant: candidate.variant } : {}),
+            }),
+          },
+          { kind: "title", agent: agent.id },
+        ).pipe(Effect.orElseSucceed(() => undefined)))
       const selected = preferred ?? primary
       if (!selected) return
       return { agent, primary, selected }
@@ -128,15 +167,42 @@ const layer = Layer.effect(
       const agent = yield* agents.select(session.agent)
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
-      const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const policy = Permission.Policy.fromRules(agent.info.permissions, session.permissions ?? [])
+      const [selected, hasWebSearch, fullCodeMode, opencodeApi, codeModeAgents] = yield* Effect.all(
+        [
+          models.select(session, model.available).pipe(Effect.orElseSucceed(() => undefined)),
+          websearch.available(),
+          flags.enabled("full_codemode"),
+          flags.enabled("opencode_api"),
+          flags.enabled("codemode_agents"),
+        ],
+        { concurrency: "unbounded" },
+      )
+      const fallbackRef = session.model ?? agent.info.model
+      const policyModel = selected?.info ?? (fallbackRef && Model.Info.default(fallbackRef.providerID, fallbackRef.id))
+      const tools = yield* registry.snapshot(policy, {
+        services,
+        api: Context.make(CodeModeApi.Service, opencodeApi ? api : CodeModeApi.disabled).pipe(
+          Context.add(Location.Service, location),
+        ),
+        ...(codeModeAgents ? { agents: Context.make(CodeModeAgents.Service, agentRunner) } : {}),
+        // An agent that can't run `execute` (such as explore) keeps every tool direct, so give it the flag-off policy.
+        tools: modelTools({
+          model: policyModel,
+          websearch: hasWebSearch,
+          fullCodeMode: fullCodeMode && Tool.codeModeAvailable(policy),
+        }),
+      })
+      const cwd = yield* sessionCwd.current(session.id)
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(permissions),
-          builtins: builtins.load(),
+          builtins: builtins.load({ cwd: cwd && SessionCwd.describe(cwd, environment.id) }),
+          cwd: cwdInstructions.load(cwd, session.id),
           discovery: discovery.load(),
-          skills: skillInstructions.load(permissions),
+          skills: skillInstructions.load(policy),
           references: referenceInstructions.load(),
-          mcp: mcpInstructions.load(permissions),
+          mcp: mcpInstructions.load(tools),
+          machines: machineInstructions.load(),
           entries: entries.load(sessionID),
         },
         { concurrency: "unbounded" },
@@ -148,25 +214,30 @@ const layer = Layer.effect(
         // prompt-cache prefix: user-level catalog and guidance, then project instructions, then
         // the date and environment, which vary by day and directory.
         instructions: Instructions.combine([
-          CodeModeInstructions.make(loaded.tools.codeModeCatalog),
+          CodeModeInstructions.make(tools.codeModeCatalog),
+          CodeModeAgents.instructions(codeModeAgents && tools.codeModeCatalog !== undefined),
           loaded.mcp,
           loaded.references,
           loaded.skills,
+          loaded.machines,
           loaded.discovery,
           loaded.builtins,
+          loaded.cwd,
           loaded.entries,
+          // Last: it changes whenever the user switches agents, so the sources above stay cached.
+          AgentInstructions.make(agent.info),
         ]),
-        tools: loaded.tools,
+        tools,
       }
     })
 
     const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
-      const model = yield* resolveModel(selection.session)
+      const model = yield* resolveModel(selection.session, { kind: "primary", agent: selection.agent.id })
       const history = yield* SessionHistory.entriesForRunner(
         db,
         selection.session.id,
         selection.instructions,
-        SessionProviderContext.provenance(model) ?? "local",
+        model.ref,
       )
       return {
         session: selection.session,
@@ -185,24 +256,47 @@ const layer = Layer.effect(
 /** Variant IDs that minimize reasoning output, in preference order. */
 const MINIMAL_REASONING_VARIANTS = ["none", "minimal", "low"].map((id) => Model.VariantID.make(id))
 
+const minimalVariant = (info: Model.Info) =>
+  MINIMAL_REASONING_VARIANTS.find((id) => info.variants.some((item) => item.id === id))
+
+/**
+ * `none` and `minimal` always reduce reasoning. `low` can enable reasoning on a model whose default
+ * does not reason, so it is only used when it ranks below the variant the session selected.
+ */
+const lowerVariant = (info: Model.Info, selected: Model.VariantID | undefined) => {
+  const rank = (id: Model.VariantID | undefined) => info.variants.findIndex((item) => item.id === id)
+  return MINIMAL_REASONING_VARIANTS.find((id) => rank(id) !== -1 && (id !== "low" || rank(id) < rank(selected)))
+}
+
 export const node = makeLocationNode({
   service: Service,
   layer,
   deps: [
     Agent.node,
+    CodeModeAgents.node,
+    CodeModeApi.node,
     Model.node,
     Database.node,
+    Environment.node,
+    FileAccess.node,
+    FileMutation.node,
+    FileWrite.node,
+    Flag.node,
     InstructionBuiltIns.node,
     InstructionDiscovery.node,
     InstructionEntry.node,
     Location.node,
+    MachineInstructions.node,
+    Environments.node,
     McpInstructions.node,
     McpTool.node,
     ReferenceInstructions.node,
+    SessionCwdInstructions.node,
     SessionRunnerModel.node,
     SessionModelRequest.node,
     SessionStore.node,
     SkillInstructions.node,
     Tool.node,
+    WebSearch.node,
   ],
 })

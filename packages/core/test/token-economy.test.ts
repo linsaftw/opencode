@@ -40,8 +40,12 @@ describe("token economy", () => {
   it("falls back safely if no main exists", () => {
     expect(mainContent('<body><h1>Keep</h1></body>')).toBe('<body><h1>Keep</h1></body>')
   })
-  it("isolates one-off cache keys from the primary session", () => {
-    expect(promptCacheKey("session-a", "compaction")).not.toBe(promptCacheKey("session-a", "primary"))
+  it("shares the primary cache key with compaction", () => {
+    expect(promptCacheKey("session-a", "compaction")).toBe(promptCacheKey("session-a", "primary"))
+  })
+  it("isolates one-off side requests from the primary cache key", () => {
+    expect(promptCacheKey("session-a", "title")).not.toBe(promptCacheKey("session-a", "primary"))
+    expect(promptCacheKey("session-a", "generate")).not.toBe(promptCacheKey("session-a", "primary"))
   })
   it("retains the original primary cache key", () => {
     expect(promptCacheKey("session-a", "primary")).toBe("session-a")
