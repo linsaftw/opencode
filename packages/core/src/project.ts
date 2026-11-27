@@ -75,6 +75,21 @@ export interface Options {
 
 const Now = Context.Reference<() => number>("@opencode/Project/Now", { defaultValue: () => Date.now })
 
+// Keyed by `.git` path plus metadata fingerprint (see gitCache), so only a change to git metadata re-spawns git.
+interface GitDiscovery {
+  readonly resolved: Resolved | undefined
+  readonly cacheable: boolean
+}
+const gitMemo = new Map<string, GitDiscovery>()
+const gitMemoCapacity = 512
+function rememberGitDiscovery(key: string, entry: GitDiscovery) {
+  if (gitMemo.size >= gitMemoCapacity) {
+    const oldest = gitMemo.keys().next()
+    if (!oldest.done) gitMemo.delete(oldest.value)
+  }
+  gitMemo.set(key, entry)
+}
+
 export interface ListInput {
   /** Includes archived Projects when true. */
   readonly archived?: boolean
@@ -395,9 +410,16 @@ const layer = Layer.effect(
     })
 
     // Keyed by `.git` path plus its metadata fingerprint, so repeat resolves spawn no git.
+    // The process-wide memo outlives this layer, so a fresh boot over unchanged git metadata spawns nothing.
     const gitCache = yield* Cache.make({
       capacity: 512,
-      lookup: (key: string) => gitDiscover(AbsolutePath.make(key.slice(0, key.indexOf("\u0000")))),
+      lookup: (key: string) => {
+        const known = gitMemo.get(key)
+        if (known) return Effect.succeed(known)
+        return gitDiscover(AbsolutePath.make(key.slice(0, key.indexOf("\u0000")))).pipe(
+          Effect.tap((entry) => Effect.sync(() => entry.cacheable && rememberGitDiscovery(key, entry))),
+        )
+      },
     })
 
     // Mercurial identity uses the cached ID or the first root changeset; remote-derived
