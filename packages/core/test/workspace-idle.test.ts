@@ -84,7 +84,8 @@ const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([Database.node, KV.node, Workspace.configured({ idleThreshold: "20 minutes", pollInterval: "1 minute" })]),
     [
-      KV.node.replace(countingKV),
+      // countingKV reads Database from the surrounding graph at runtime; the type only accepts closed layers.
+      KV.node.replace(countingKV as Layer.Layer<KV.Service>),
       WorkspaceDriver.node.replace(WorkspaceDriver.registryNode({ fake: driver })),
     ],
   ),
