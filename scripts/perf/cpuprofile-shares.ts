@@ -25,11 +25,18 @@ const SUBSYSTEMS: Array<[string, RegExp]> = [
   ["other", /./],
 ]
 
+// WINDOW_S=10 keeps only samples in the last 10 seconds of the profile (microseconds timeline).
+const windowStart = process.env.WINDOW_S
+  ? (profile as unknown as { endTime: number }).endTime - Number(process.env.WINDOW_S) * 1e6
+  : -Infinity
 const selfByNode = new Map<number, number>()
 let busy = 0
 let idle = 0
+let clock = (profile as unknown as { startTime: number }).startTime
 profile.samples.forEach((nodeID, index) => {
   const weight = profile.timeDeltas[index + 1] ?? profile.timeDeltas[index] ?? 0
+  clock += profile.timeDeltas[index] ?? 0
+  if (clock < windowStart) return
   const name = byID.get(nodeID)?.callFrame.functionName ?? ""
   if (name === "(idle)" || name === "(program)") {
     idle += weight

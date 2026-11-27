@@ -61,3 +61,12 @@
 - video-generation tick (kv.scan per idle tick): before 12 scans per simulated minute (one full paged scan per 5 s tick with no running job; test/video-generation-idle.test.ts, measured on HEAD). Layer is makeGlobalNode, so one instance per process, not per Location or session.
 - After: 1 scan per simulated minute while idle (a one-row json_extract probe every 5 s, full scan once a minute for expiry). A new job is read by its first provider status call within 5 s, also when started on another server. Running jobs keep the 5 s scan.
 - Verified: bun test test/video-generation-idle.test.ts test/video-generation.test.ts test/tool-video-generate.test.ts = 5 pass, 0 fail (with --timeout 120000; the existing video tests already exceed Bun's 5 s default on HEAD); bun typecheck clean.
+
+## 2026-11-27 offline conversation profile (attempt, no src change)
+
+- Offline provider: `scripts/perf/fake-openai-server.ts` (OpenAI-compatible SSE, 200 x 4-char deltas, two `glob` tool calls per user turn, then text stop). Point a server at it with `OPENCODE_CONFIG_CONTENT='{"provider":{"openai":{"settings":{"baseURL":"http://127.0.0.1:PORT/v1"}}}}'` and isolated `XDG_*` under `/tmp/claude-1000/prof2/`. Driver: `scripts/perf/drive-conversations.ts <url> 3` (needs `OPENCODE_SERVER_PASSWORD`, Basic auth user `opencode`).
+- Driven: 3 conversations, 6 persisted messages, 30 SSE events. Timings 8755 / 97 / 90 ms (first includes warmup).
+- Profile: `bun --cpu-prof` only writes on exit (not used: process must not be killed). SIGPROF hook (`packages/cli/src/cpu-profile.ts`) wrote `cpu-1910718-*.cpuprofile`, but its timeline spans 662 s with only 6550 samples, so the full-profile shares are not usable.
+- Last 10 s window (`WINDOW_S=10`, new option in `cpuprofile-shares.ts`): busy 9997 ms; `values` (SqliteClient.js:118, `@effect/sql-sqlite-bun`) 50.3%, `realpathCb` 31.9%, `setImmediate` 8.8%, `orderSelectedFields` (drizzle utils.js:220) 4.7%. The conversation itself (~0.4 s) was not captured in this window. These are background, not conversation, shares.
+- Candidates: (1) SqliteClient `.values()` hot loop outside conversations (idle-tick DB polling), (2) `realpathCb` in background scans, (3) `orderSelectedFields` / `buildOrderBy` per-query drizzle cost.
+- Next: a SIGPROF window started immediately before the driver, with the driver looped 20x so the window holds real conversation work.
