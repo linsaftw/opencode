@@ -160,3 +160,6 @@
 - CONFIG-V1 (2026-11-27): split TUI config/v1 into plain packages/tui/src/config/v1/info.ts (schemas + resolve, self-export TuiConfigV1); v1/index.tsx now re-exports info plus the Solid provider; cli config/migrate.ts imports @opencode/tui/config/v1/info (new package export).
 - CONFIG-V1 proof: bun build src/config/migrate.ts --metafile lists no .tsx under tui/src/config; cli bun test test/config.test.ts 18 pass 0 fail; tui and cli bun typecheck clean. Schema output not regenerated; cpu-prof babel share not measured (time).
 - CONFIG-V1 open: cpu-prof before/after on throwaway serve (port 49701) not run.
+- STARTUP-CONFIG-V1 (2026-11-27): serve health (GET /api/info 200 with basic auth, port 49701) before 6b761d33d3 = 19959 ms (cold) / 4800 ms; after 27d4118bbe = 2670 ms / 3957 ms. CPU ticks at health before 446 / 460 (4.46 / 4.60 s), after 352 / 391 (3.52 / 3.91 s).
+- STARTUP-CONFIG-V1 babel share (inclusive samples under babel/transform frames, busy samples, whole-process profile): before 31.5% / 31.5%; after 26.7% / 28.7%. Noise-level change, no babel cut proven.
+- STARTUP-CONFIG-V1 note: /global/health returned 500 on the before worktree and 200 on after, so health used /api/info with auth for both; before-tree 500 cause not investigated. Worktree removed; profiles in scratchpad prof-{before,after}-{1,2}.
