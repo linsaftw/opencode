@@ -210,3 +210,9 @@
 - 2026-11-27 drizzle _prepare build probe (scratch copy of perf-session-turn-sql, patched _prepare timing sqlToQuery+orderSelectedFields): 112 builds/turn, 14.4 ms (6.2% of probe wall, same-run wall noisy 66-233 ms). Top: projector prepareAssistantParts select 4.3 ms/10 calls (434 us each, correlated subquery, not hoisted); event_sequence select 1.66 ms/22 (75 us); event-by-id select 1.0 ms/22 (46 us).
 - 2026-11-27 landed: bus.ts per-publish event_sequence select prepared once per layer (sql.placeholder aggregateID, .prepare()); probe builds 112 -> 90 calls, 14.4 -> 9.5 ms; statement list unchanged (185 stmts, 24 tx); bus-session-routing/event-logger/bus-fast-path 12 pass, session-projector/session-create 93 pass, bun typecheck clean.
 - 2026-11-27 not done: projector prepareAssistantParts hoist (needs db-bound prepared statement per layer, 434 us/call is the largest build); event-by-id select (bus.ts:367) still per call. Scratch bench copy: scratchpad perf-select-build.test.ts.txt.
+
+## 2026-11-27c call-tree attribution (docs/perf/PROFILE-2026-11-27c.md)
+- scripts/perf/cpuprofile-callers.ts added (self/inclusive, top 5 callers/callees, repo owners under a wrapper, gap report, --weight=count).
+- The 16.9% utils.js:3 wrapper is one 4.9 s sample gap at 2.2 s after start (boot); 0.02% of samples by count; 0 repo owners under it.
+- 67.8-69.3% of duration-weighted busy time sits in >50 ms gap samples; duration shares are unreliable for this method.
+- Count-weighted top repo owners are boot-time models-dev.ts:220/235 (~9-13%); conversation window is ~5 s. Next: windowed profile (start at first prompt), count shares.
