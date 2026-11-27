@@ -1,0 +1,327 @@
+diff --git a/docs/perf/LOG.md b/docs/perf/LOG.md
+index 385f8a8ea2..00ad02dd91 100644
+--- a/docs/perf/LOG.md
++++ b/docs/perf/LOG.md
+@@ -194,3 +194,10 @@
+ - Probe ftsShare after the change: 0.12, 0.15, 0.19, 0.23, 0.26, 0.30 over six runs (min-of-5 arms, shared machine); completion reindex alone is 0.10-0.20, so the <15% target is not met robustly. Search hits 220 and 50-session corpus hits deepEqual held in every run; 83 projector/search/store tests passed.
+ - Reverted fully (git diff clean vs HEAD); the next lever is the per-completion reindex cost in search-index.ts, not the data trigger.
+ - 2026-11-27 FTS prefilter REVERTED (orchestrator): ba5c96bf98 changed trigger SQL without a SessionSearchIndex.Version bump, so the SQL-pin test failed on HEAD and existing databases would never get the new trigger. Bumping means a full index rebuild on the live DB (cost unmeasured), so search-index.ts is back to its pre-ba5c content; the probe stays (instr test skipped). The binary installed at 23:16:55Z contains the prefilter source but it only affects newly created indexes. Next: measure rebuild cost per 10k messages, then bump Version with the column-only guard (probe share 7-30%, noisy) in one change.
++- 2026-11-27 SessionSearchIndex version bump, synthetic (test/perf-session-search-rebuild.test.ts, in-memory, ~1.3 KB/message, 5 text parts): 2k/10k/40k messages rebuild in 156/818/5787 ms (ensure reset 3-5 ms; 42/204/810 chunks of 50 rows); max blocking chunk 5/9/28 ms, p50 4-7 ms; 4.8k-12.9k rows/s over two runs (load varies); writes interleave between chunks (one IMMEDIATE tx each).
++- Live opencode.db read-only sample: 11.1 GB, 1,034,473 session_message, 703,946 session_part, 35,985 sessions; extrapolated ~1.07M rows, ~150 s at bump rate (100-300 s range, real messages ~10 KB so throughput may drop), max chunk well under 2 s.
++- Verdict: per-batch blocking is acceptable (<2 s, background, interleaves); total ~100-300 s misses the ~60 s bar, so a bump is acceptable only as a background rebuild, not a blocking one. Re-measure on a copy of the live DB before shipping.
++- 2026-11-27 SessionSearchIndex Version 2: session_part update trigger drops `data` (AFTER UPDATE OF type, ordinal); new `reindexPart` helper called from projector messageWrites (text part data changed) and updateAssistantPart (text match); it reindexes only a finished assistant, so streamed deltas do not reindex. instr() prefilter kept in parentFinished; instr equivalence test un-skipped and passing.
++- Probe ftsShare (6 runs, 200 turns, shared machine): 0.0756, 0.1097, 0.214, 0.227, 0.2571, 0.2647; median 0.2205 vs 61% HEAD baseline (HEAD not re-measured this run). search/projector suites 75 pass (6 files); bun typecheck clean.
++- Not proven: deepEqual hits before vs after on the 50-session corpus and an upgrade-from-v1 DB built by the old triggers (the probe stub db never reads state, so the corpus cannot exercise reindexPart); covered only by the real-db "follows part edits" test (both layouts) and the older-version rebuild test. Live DB rebuild cost still ~100-300 s in background, unmeasured on a copy.
++- 2026-11-27 proofs (same session): real-DB 50-session corpus with streams, post-completion edits, deletes: hits deepEqual across Version 1 triggers, incremental v2, and fresh build. Upgrade v1 to v2: background rebuild with edits mid-build equals fresh build. Same-machine FTS share, 6 runs median: HEAD 0.271 vs new 0.217 (ranges overlap; the 61% figure did not reproduce).
+diff --git a/packages/core/src/session/projector.ts b/packages/core/src/session/projector.ts
+index d4c14be4de..41ec2114eb 100644
+--- a/packages/core/src/session/projector.ts
++++ b/packages/core/src/session/projector.ts
+@@ -20,6 +20,7 @@ import { SessionBlob } from "./blob.js"
+ import { SessionInboxTable, SessionMessageTable, SessionPartTable, SessionTable, type SessionPartData } from "./sql.js"
+ import { SessionStored } from "./stored.js"
+ import { InstructionEntry } from "./instruction-entry.js"
++import { SessionSearchIndex } from "./search-index.js"
+ import type { SQLiteUpdateSetSource } from "drizzle-orm/sqlite-core/query-builders/update"
+ import { Slug } from "../util/slug.js"
+ import { FSUtil } from "@opencode/util/fs-util"
+@@ -531,13 +532,15 @@ function messageWrites(db: DatabaseService, event: MessageEvent): Writes {
+           })
+           .run()
+           .pipe(Effect.orDie)
+-      else if (JSON.stringify(current.data) !== JSON.stringify(part))
++      else if (JSON.stringify(current.data) !== JSON.stringify(part)) {
+         yield* db
+           .update(SessionPartTable)
+           .set({ ...columns, time_updated: event.created })
+           .where(and(eq(SessionPartTable.message_id, messageID), eq(SessionPartTable.ordinal, current.ordinal)))
+           .run()
+           .pipe(Effect.orDie)
++        if (part.type === "text" || current.type === "text") yield* SessionSearchIndex.reindexPart(db, messageID)
++      }
+     }
+     const stale = existing.slice(content.length).map((part) => part.ordinal)
+     if (stale.length > 0)
+@@ -771,6 +774,7 @@ function partRowWrites(db: DatabaseService, event: MessageEvent): Writes {
+           .where(and(eq(SessionPartTable.message_id, messageID), eq(SessionPartTable.ordinal, row.ordinal)))
+           .run()
+           .pipe(Effect.orDie)
++        if (match.type === "text") yield* SessionSearchIndex.reindexPart(db, messageID)
+         if (stored !== updated) yield* SessionBlob.recordRefs(db, owner, { content: [data] })
+       })
+     },
+diff --git a/packages/core/src/session/search-index.ts b/packages/core/src/session/search-index.ts
+index 6b2327f4ce..d1b883db4b 100644
+--- a/packages/core/src/session/search-index.ts
++++ b/packages/core/src/session/search-index.ts
+@@ -19,7 +19,7 @@ import { SessionMessage } from "./message.js"
+ type DatabaseService = Database.Interface["db"]
+ 
+ /** Bump when the columns, tokenizer, triggers or extracted text change, so {@link ensure} rebuilds. */
+-export const Version = 1
++export const Version = 2
+ 
+ export type Layout = "compact" | "text"
+ 
+@@ -279,7 +279,7 @@ SELECT source_id, session_id, ${fold("title")}, ${fold("summary")}, ${fold("user
+ const finished = (row: string) =>
+   `(${row}.type <> 'assistant' OR NOT json_valid(${row}.data) OR json_extract(${row}.data, '$.time.completed') IS NOT NULL)`
+ const parentFinished = (row: string) =>
+-  `EXISTS (SELECT 1 FROM session_message AS m WHERE m.id = ${row}.message_id AND m.type = 'assistant' AND json_valid(m.data) AND json_extract(m.data, '$.time.completed') IS NOT NULL)`
++  `EXISTS (SELECT 1 FROM session_message AS m WHERE m.id = ${row}.message_id AND m.type = 'assistant' AND instr(m.data, '"completed"') > 0 AND json_valid(m.data) AND json_extract(m.data, '$.time.completed') IS NOT NULL)`
+ 
+ const remove = (layout: Layout, id: string) =>
+   layout === "compact"
+@@ -307,7 +307,8 @@ const sourceTriggers = (layout: Layout) => ({
+   session_search_message_update: `AFTER UPDATE OF type, data ON session_message WHEN (NEW.type IN (${Indexed}) AND ${finished("NEW")}) OR (OLD.type IN (${Indexed}) AND NEW.type NOT IN (${Indexed})) BEGIN ${reindex(layout, "NEW.id", "NEW.session_id")} END`,
+   session_search_message_delete: `AFTER DELETE ON session_message WHEN OLD.type IN (${Indexed}) BEGIN ${remove(layout, "OLD.id")} END`,
+   session_search_part_insert: `AFTER INSERT ON session_part WHEN NEW.type = 'text' AND ${parentFinished("NEW")} BEGIN ${reindex(layout, "NEW.message_id", "NEW.session_id")} END`,
+-  session_search_part_update: `AFTER UPDATE OF type, data, ordinal ON session_part WHEN (NEW.type = 'text' OR OLD.type = 'text') AND ${parentFinished("NEW")} BEGIN ${reindex(layout, "NEW.message_id", "NEW.session_id")} END`,
++  // Not `data`: every streamed delta would pay for this check. Post-completion data edits call reindexPart instead.
++  session_search_part_update: `AFTER UPDATE OF type, ordinal ON session_part WHEN (NEW.type = 'text' OR OLD.type = 'text') AND ${parentFinished("NEW")} BEGIN ${reindex(layout, "NEW.message_id", "NEW.session_id")} END`,
+   // In a cascade from session_message or session_v2, the parent row is already gone, so this is skipped and the
+   // message's own trigger removes the entry.
+   session_search_part_delete: `AFTER DELETE ON session_part WHEN OLD.type = 'text' AND EXISTS (SELECT 1 FROM session_v2 AS s WHERE s.id = OLD.session_id) AND ${parentFinished("OLD")} BEGIN ${reindex(layout, "OLD.message_id", "OLD.session_id")} END`,
+@@ -391,6 +392,23 @@ const reindexBatch = Effect.fnUntraced(function* (
+   }
+ })
+ 
++/**
++ * Reindexes a message after its session_part data was edited, which the part trigger does not watch. Like that trigger,
++ * it indexes only a finished assistant: a streaming message is indexed once, at completion.
++ */
++export const reindexPart = Effect.fn("SessionSearchIndex.reindexPart")(function* (
++  db: DatabaseService,
++  messageID: string,
++) {
++  const state = yield* readState(db).pipe(Effect.orDie)
++  if (!current(state)) return
++  const message = yield* db.get<{ session_id: string }>(
++    sql`SELECT session_id FROM session_message AS m WHERE m.id = ${messageID} AND m.type = 'assistant' AND json_valid(m.data) AND json_extract(m.data, '$.time.completed') IS NOT NULL`,
++  ).pipe(Effect.orDie)
++  if (!message) return
++  yield* reindexBatch(db, state.layout, [{ id: messageID, session: message.session_id }]).pipe(Effect.orDie)
++})
++
+ const reset = Effect.fnUntraced(function* (db: DatabaseService, layout: Layout) {
+   yield* unlink(db)
+   for (const name of Tables) yield* db.run(`DROP TABLE IF EXISTS ${name}`)
+diff --git a/packages/core/test/perf-session-search-trigger.test.ts b/packages/core/test/perf-session-search-trigger.test.ts
+index 932dd927b3..ccd87572ab 100644
+--- a/packages/core/test/perf-session-search-trigger.test.ts
++++ b/packages/core/test/perf-session-search-trigger.test.ts
+@@ -230,8 +230,8 @@ const withPrefilter = (raw: Database, prefilter: boolean) => {
+   raw.exec(sql)
+ }
+ 
+-// Skipped: the instr prefilter in search-index.ts was reverted (it changes trigger SQL, which needs a Version bump and a live index rebuild).
+-test.skip("instr prefilter keeps search hits identical on a 50-session corpus", () => {
++// The instr prefilter is in search-index.ts, so this proves it is equivalent to the bare EXISTS test on the corpus.
++test("instr prefilter keeps search hits identical on a 50-session corpus", () => {
+   const hits = (prefilter: boolean) => {
+     const { raw, db } = open()
+     Effect.runSync(SessionSearchIndex.ensure(db as unknown as Db))
+@@ -245,5 +245,7 @@ test.skip("instr prefilter keeps search hits identical on a 50-session corpus",
+   const guarded = hits(true)
+   expect(guarded).toEqual(bare)
+   expect(guarded.some((ids) => ids.length > 0)).toBe(true)
+-  expect(guarded[2]?.length).toBeGreaterThan(0)
++  // Index 5 is "question": user rows are indexed on insert, so this proves hits exist. The stub db above never reads
++  // state, so reindexPart is a no-op here and post-completion data edits are covered by session-search-index.test.ts.
++  expect(guarded[5]?.length).toBeGreaterThan(0)
+ })
+diff --git a/packages/core/test/session-search-index.test.ts b/packages/core/test/session-search-index.test.ts
+index 7140990fd2..83f280b4e8 100644
+--- a/packages/core/test/session-search-index.test.ts
++++ b/packages/core/test/session-search-index.test.ts
+@@ -216,9 +216,9 @@ describe("SessionSearchIndex", () => {
+         compact: yield* hash("compact"),
+         text: yield* hash("text"),
+       }).toEqual({
+-        version: 1,
+-        compact: "2e71a11e28e2a65887e43b78786ab1b19d4c2f57f758008f7c8aa13a8a13ca36",
+-        text: "26eb886bf1c5d1098ded9280ba792b37c46bdb8fd3ed2d81b4efc8f6ad0f8437",
++        version: 2,
++        compact: "0fd53390903f883c635d4444f76b13ba7026ff372346e0292c57c791f000a158",
++        text: "46a084a9f58abde8986d90dc9df78562cf687c83e2e95fa8d50ea7cc9467edb5",
+       })
+     }),
+   )
+@@ -302,12 +302,13 @@ describe("SessionSearchIndex", () => {
+         yield* index(db, layout)
+         expect(yield* find(db, "firstpart secondpart")).toEqual([id("a3")])
+ 
+-        // The triggers keep the index current in the same transaction as the write.
++        // The part trigger does not watch data, so a data edit reindexes through the helper production calls after it.
+         yield* db
+           .update(SessionPartTable)
+           .set({ data: encodePart(text("editedpart")) })
+           .where(and(eq(SessionPartTable.message_id, id("a3")), eq(SessionPartTable.ordinal, 2)))
+           .run()
++        yield* SessionSearchIndex.reindexPart(db, id("a3"))
+         yield* rewrite(db, user("a1", "rewritten alpha prompt"))
+         yield* db.update(SessionTable).set({ title: "gamma title" }).where(eq(SessionTable.id, sessionA)).run()
+         expect(yield* find(db, "first secondpart")).toEqual([])
+@@ -522,3 +523,162 @@ describe("SessionSearchIndex", () => {
+     }),
+   )
+ })
++
++// The Version 1 part trigger: it watched `data` and had no instr() prefilter. Compact layout only, so the reindex body is
++// inlined here instead of imported (the real one is not exported).
++const VersionOnePartUpdate = `AFTER UPDATE OF type, data, ordinal ON session_part WHEN (NEW.type = 'text' OR OLD.type = 'text') AND EXISTS (SELECT 1 FROM session_message AS m WHERE m.id = NEW.message_id AND m.type = 'assistant' AND json_valid(m.data) AND json_extract(m.data, '$.time.completed') IS NOT NULL) BEGIN
++  DELETE FROM session_search WHERE rowid = (SELECT id FROM session_search_document WHERE source_id = NEW.message_id);
++  DELETE FROM session_search_document WHERE source_id = NEW.message_id;
++  INSERT INTO session_search_document (source_id, session_id) VALUES (NEW.message_id, NEW.session_id);
++  INSERT INTO session_search (rowid, title, summary, user_text, assistant_text)
++    SELECT document.id, source.title, source.summary, source.user_text, source.assistant_text
++    FROM session_search_source AS source, session_search_document AS document
++    WHERE source.source_id = NEW.message_id AND document.source_id = NEW.message_id;
++END`
++
++const swapPartTrigger = (db: Db) =>
++  Effect.gen(function* () {
++    yield* db.run("DROP TRIGGER session_search_part_update")
++    yield* db.run(`CREATE TRIGGER session_search_part_update ${VersionOnePartUpdate}`)
++  })
++
++const Queries = ["indexing", "delta", "gamma", "edited", "parsing", "question", "alpha1", "bravo", "renamed", "streaming", "words"]
++const hits = (db: Db) => Effect.forEach(Queries, (query) => find(db, query))
++
++const addPart = (db: Db, message: string, session: SessionID, content: SessionMessage.AssistantContent) =>
++  db
++    .insert(SessionPartTable)
++    .values({
++      message_id: id(message),
++      session_id: session,
++      ordinal: 0,
++      type: "text",
++      call_id: null,
++      time_created: 1,
++      time_updated: 1,
++      data: encodePart(content),
++    })
++    .run()
++
++/** A raw part edit, as the streaming and legacy paths make it; `reindex` is what production calls after a post-completion one. */
++const editPart = (db: Db, message: string, value: string, reindex: boolean) =>
++  Effect.gen(function* () {
++    yield* db
++      .update(SessionPartTable)
++      .set({ data: encodePart(text(value)) })
++      .where(and(eq(SessionPartTable.message_id, id(message)), eq(SessionPartTable.ordinal, 0)))
++      .run()
++    if (reindex) yield* SessionSearchIndex.reindexPart(db, id(message))
++  })
++
++/** Streams, completes and edits assistant messages in 50 sessions, then deletes some messages and sessions. */
++const seedA = (db: Db, reindex: boolean) =>
++  Effect.gen(function* () {
++    for (let i = 0; i < 50; i++) {
++      const session = SessionID.make(`ses_corpus_${i}`)
++      yield* addSession(db, session, i % 4 === 3 ? null : `Session ${i} parsing alpha${i % 6}`)
++      for (let k = 0; k < 3; k++) {
++        const turn = `c${i}_${k}`
++        yield* addMessages(
++          db,
++          session,
++          [user(`${turn}u`, `question ${k} of ses ${i} about indexing alpha${i % 6}`), assistant(`${turn}a`, [], false)],
++          k * 2 + 1,
++        )
++        yield* addPart(db, `${turn}a`, session, text(""))
++        for (let d = 1; d <= 5; d++) yield* editPart(db, `${turn}a`, `delta ${d} streaming`, false)
++        yield* rewrite(db, assistant(`${turn}a`, [], true))
++        if (i % 5 === 0 && k === 1) yield* editPart(db, `${turn}a`, "edited words gamma", reindex)
++      }
++    }
++    for (let i = 0; i < 50; i += 7) yield* db.delete(SessionMessageTable).where(eq(SessionMessageTable.id, id(`c${i}_0u`))).run()
++    for (let i = 0; i < 50; i += 11) yield* db.delete(SessionTable).where(eq(SessionTable.id, SessionID.make(`ses_corpus_${i}`))).run()
++  })
++
++/** Later writes: new completed replies in live sessions, a post-completion edit, a rename. */
++const seedB = (db: Db, reindex: boolean) =>
++  Effect.gen(function* () {
++    for (let i = 1; i <= 10; i++) {
++      const session = SessionID.make(`ses_corpus_${i}`)
++      yield* addMessages(db, session, [assistant(`b${i}a`, [], false)], 7)
++      yield* addPart(db, `b${i}a`, session, text("bravo streaming"))
++      yield* rewrite(db, assistant(`b${i}a`, [], true))
++      yield* editPart(db, `b${i}a`, "bravo edited", reindex)
++    }
++    yield* db.update(SessionTable).set({ title: "renamed gamma" }).where(eq(SessionTable.id, SessionID.make("ses_corpus_2"))).run()
++  })
++
++/** A fresh in-memory database per arm, since `database()` inserts a project and each arm needs its own. */
++const arm = <A, E>(body: (db: Db) => Effect.Effect<A, E>) =>
++  database().pipe(
++    Effect.flatMap(body),
++    Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })),
++  )
++
++describe("SessionSearchIndex corpus proofs", () => {
++  it.effect("gives the same hits as the Version 1 triggers and as a fresh build on a 50-session corpus", () =>
++    Effect.gen(function* () {
++      const old = yield* arm((db) =>
++        Effect.gen(function* () {
++          yield* index(db)
++          yield* swapPartTrigger(db)
++          yield* seedA(db, false)
++          yield* seedB(db, false)
++          return yield* hits(db)
++        }),
++      )
++      const incremental = yield* arm((db) =>
++        Effect.gen(function* () {
++          yield* index(db)
++          yield* seedA(db, true)
++          yield* seedB(db, true)
++          return yield* hits(db)
++        }),
++      )
++      const fresh = yield* arm((db) =>
++        Effect.gen(function* () {
++          yield* seedA(db, false)
++          yield* seedB(db, false)
++          yield* index(db)
++          return yield* hits(db)
++        }),
++      )
++
++      expect(incremental).toEqual(old)
++      expect(incremental).toEqual(fresh)
++      expect(incremental[Queries.indexOf("bravo")]).toHaveLength(10)
++      expect(incremental[Queries.indexOf("gamma")]?.length).toBeGreaterThan(0)
++    }),
++  )
++
++  it.effect("upgrades a Version 1 index to Version 2 in the background and matches a fresh build", () =>
++    Effect.gen(function* () {
++      const upgraded = yield* arm((db) =>
++        Effect.gen(function* () {
++          yield* index(db)
++          yield* swapPartTrigger(db)
++          yield* writeState(db, { version: 1, status: "done", phase: "messages" })
++          yield* seedA(db, false)
++          const ensured = yield* SessionSearchIndex.ensure(db)
++          expect(ensured).toMatchObject({ status: "ready", state: { version: 2, status: "building" } })
++          yield* SessionSearchIndex.buildChunk(db, { limit: 5 })
++          expect(yield* SessionSearchIndex.state(db)).toMatchObject({ version: 2, status: "building" })
++          // Writes arrive while the rebuild is partway through.
++          yield* seedB(db, true)
++          yield* build(db)
++          expect(yield* SessionSearchIndex.state(db)).toMatchObject({ version: 2, status: "done" })
++          return yield* hits(db)
++        }),
++      )
++      const fresh = yield* arm((db) =>
++        Effect.gen(function* () {
++          yield* seedA(db, false)
++          yield* seedB(db, false)
++          yield* index(db)
++          return yield* hits(db)
++        }),
++      )
++      expect(upgraded).toEqual(fresh)
++    }),
++  )
++})
