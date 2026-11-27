@@ -31,3 +31,14 @@
   integration.ts 30 s scrub loops that wake with empty maps (arm one timer to earliest expiry).
   Add a test-only counter or event hook, then re-apply. Also still open: SSE heartbeat per client,
   recursive watchers without ignore (config/plugin/skill.ts, plugin/module.ts), 1-min sweeps.
+
+## 2026-11-27 merge + install (binary swapped on disk, service swap pending)
+- Upstream sync merged (0cccf8aa86): 496 core tests, typecheck clean in core/cli/server; snapshot racy loop 50/50.
+  Superseded by upstream and dropped: projector stored-JSON reuse, fixed 15 min Console re-check.
+- Binary built and installed to ~/.local/bin/opencode (v2.4.1). No backups kept (user order).
+- Service swap blocked: `service status` reports stopped while pid 1415877 serves 49374 (health 200), so
+  `service restart` tries to start a second copy and exits; clients retry-spawn short-lived `serve --service`.
+  Needs the old pid to exit once (user decision pending).
+- Live composition, 5 s per-thread ticks (service under ~45 workers, ~45% of one core):
+  main JS thread 223 (80%), JIT 28 (10%), HTTP client 12, heap helper 10, mi-scav 5 (2%).
+  mi-scav is no longer a meaningful share under load. NEXT TARGET: main-thread JS (profile with --cpu-prof on a throwaway instance).
