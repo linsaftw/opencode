@@ -16,7 +16,7 @@ echo "== build this host target (version $SOURCE_VERSION, local channel) =="
 OPENCODE_VERSION="$SOURCE_VERSION" OPENCODE_CHANNEL=local bun run --cwd packages/cli build --single
 TARGET="$(find "$ROOT/packages/cli/dist" -type f -path '*/bin/opencode' -print -quit)"
 if [[ -z "$TARGET" || ! -x "$TARGET" ]]; then echo 'Build did not produce an executable' >&2; exit 1; fi
-BUILT_VERSION="$("$TARGET" --version)"
+BUILT_VERSION="$("$TARGET" --version | sed "s/^opencode v//")"
 if [[ "$BUILT_VERSION" != "$SOURCE_VERSION" ]]; then
   echo "Built version mismatch: expected $SOURCE_VERSION, got $BUILT_VERSION" >&2
   exit 1

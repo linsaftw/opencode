@@ -10,7 +10,7 @@ if [[ ! -f "$SOURCE" || ! -x "$SOURCE" ]]; then
   echo 'Run bash script/token-economy/build-install.sh first.' >&2
   exit 1
 fi
-ACTUAL="$("$SOURCE" --version)"
+ACTUAL="$("$SOURCE" --version | sed "s/^opencode v//")"
 if [[ -z "$EXPECTED" || "$ACTUAL" != "$EXPECTED" ]]; then
   echo "Refusing to install version $ACTUAL; expected $EXPECTED." >&2
   exit 1
@@ -20,15 +20,10 @@ if [[ "$SOURCE" -ef "$DEST" ]] || { [[ -f "$DEST" ]] && cmp -s -- "$SOURCE" "$DE
   echo "Already installed: $DEST ($ACTUAL)"
   exit 0
 fi
-if [[ -e "$DEST" || -L "$DEST" ]]; then
-  BACKUP="$DEST.backup-$(date +%Y%m%d%H%M%S)-$$"
-  cp -a -- "$DEST" "$BACKUP"
-  echo "Previous ~/.local/bin/opencode saved as: $BACKUP"
-fi
 TEMP="$(mktemp "$HOME/.local/bin/.opencode.new.XXXXXXXX")"
 trap 'rm -f -- "$TEMP"' EXIT
 install -m 755 -- "$SOURCE" "$TEMP"
-if [[ "$("$TEMP" --version)" != "$EXPECTED" ]]; then
+if [[ "$("$TEMP" --version | sed "s/^opencode v//")" != "$EXPECTED" ]]; then
   echo 'Staged executable failed its version check.' >&2
   exit 1
 fi
