@@ -70,3 +70,17 @@
 - Last 10 s window (`WINDOW_S=10`, new option in `cpuprofile-shares.ts`): busy 9997 ms; `values` (SqliteClient.js:118, `@effect/sql-sqlite-bun`) 50.3%, `realpathCb` 31.9%, `setImmediate` 8.8%, `orderSelectedFields` (drizzle utils.js:220) 4.7%. The conversation itself (~0.4 s) was not captured in this window. These are background, not conversation, shares.
 - Candidates: (1) SqliteClient `.values()` hot loop outside conversations (idle-tick DB polling), (2) `realpathCb` in background scans, (3) `orderSelectedFields` / `buildOrderBy` per-query drizzle cost.
 - Next: a SIGPROF window started immediately before the driver, with the driver looped 20x so the window holds real conversation work.
+
+## Idle wakeups (2026-11-27, pid 1910718, read-only)
+- Wall-clock over 20 s idle: main JS thread 6 ticks (60 ms), thread 1910722 28 ticks (280 ms), mi-scavenger 13 ticks; the profile's `values`/`realpathCb` shares are of active samples only.
+- Periodic sources (file:line): video probe `packages/core/src/video-generation.ts:336-340`, every 5 s (12/min), full scan every 60 s; workspace idle sweep `packages/core/src/workspace.ts:386-391`, every 1 min; file-watch sweep `packages/core/src/filesystem/file-watch.ts:131`, 5 min; project sweep `packages/core/src/project.ts:555`, 1 h; config well-known `packages/core/src/config.ts:488`, 10 min.
+- Probe SQL `video-generation.ts:320-330` uses `key LIKE 'video:%'`, which SQLite plans as SCAN kv; `key >= 'video:' AND key < 'video;'` plans as SEARCH on the primary key. Not changed: kv here holds 4 rows, so the gain is below measurable wall-clock; `realpathCb` has no periodic caller found in packages/core (vcs/config/snapshot paths are event-driven).
+
+## 2026-11-27 15:13 machine-wide composition (ps, read-only; load avg 38)
+- java (gradle/javac/Minecraft builds started by workers): ~1094% of cores. opencode (270 procs): ~175%. claude: ~21%. other: <40%.
+- Still 56 `opencode run --standalone` and 29 `serve --stdio` backends: these come from MCP servers still running the OLD
+  code in existing Claude sessions. They disappear after Claudes restart with the new MCP (shared-backend attach).
+- Idle service main thread: ~0.3% of a core (20 s, /proc ticks). Idle polling is no longer a meaningful share.
+- Conclusion: largest controllable shares now are (1) standalone backends (fixed in MCP, needs Claude restart),
+  (2) worker-launched build tools (java ~6x opencode; a build-concurrency cap belongs to the pool, not the server),
+  (3) service swap to the merged binary. Conversation-path profile still owed (windowed, looped driver).
