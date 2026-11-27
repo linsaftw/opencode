@@ -434,9 +434,11 @@ const layer = Layer.effect(
           path.join(input.seed.commonDirectory, "objects") + "\n",
         )
         .pipe(Effect.mapError(operationError("Failed to configure shared Git objects")))
-      yield* fs
-        .copyFile(path.join(input.seed.gitDirectory, "index"), path.join(input.directory, "index"))
-        .pipe(Effect.ignore)
+      // Seeding must keep the source index's timestamp: a plain copy stamps it with the copy time, which makes
+      // racily clean entries look settled and hides a same-second edit from the next capture.
+      yield* copyIndex(path.join(input.seed.gitDirectory, "index"), path.join(input.directory, "index")).pipe(
+        Effect.ignore,
+      )
     })
 
     /**
