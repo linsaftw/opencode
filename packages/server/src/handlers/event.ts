@@ -8,6 +8,7 @@ import { EventFeed } from "../event-feed"
 export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers) =>
   Effect.gen(function* () {
     const feed = yield* EventFeed.Service
+    const heartbeats = yield* EventFeed.heartbeatHub()
     return handlers.handleRaw("event.subscribe", (ctx) =>
       Effect.gen(function* () {
         const output = Stream.unwrap(
@@ -25,9 +26,11 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
               ),
             ),
         )
-        const heartbeat = Stream.tick("15 seconds").pipe(Stream.map(() => ": heartbeat\n\n"))
         return HttpServerResponse.stream(
-          output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }), Stream.encodeText),
+          output.pipe(
+            Stream.merge(EventFeed.heartbeatStream(heartbeats), { haltStrategy: "left" }),
+            Stream.encodeText,
+          ),
           {
             contentType: "text/event-stream",
             headers: {

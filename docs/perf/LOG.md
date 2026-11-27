@@ -84,3 +84,7 @@
 - Conclusion: largest controllable shares now are (1) standalone backends (fixed in MCP, needs Claude restart),
   (2) worker-launched build tools (java ~6x opencode; a build-concurrency cap belongs to the pool, not the server),
   (3) service swap to the merged binary. Conversation-path profile still owed (windowed, looped driver).
+
+- to-llm-message cache (reverted): per-message conversion is already flatMapped per step in `baseTranscript`; 40 messages cost 0.38 ms/step uncached vs 0.004 ms/step with an identity WeakMap (about 40 conversions/step down to 0 on unchanged rows).
+- Retained heap of cached output: 40 messages 36 outputs, about -0.1 MB (noise); 400 messages 412 outputs, 267 KB against a 94.6 KB history (282%, far over the 10% bar), so the cache was reverted and src is unchanged.
+- Decision: no cache. The 0.37 ms saving per step is not worth retaining 2.8x the history; revisit only if conversion shows up in a windowed profile.

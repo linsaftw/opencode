@@ -3,9 +3,12 @@ export * as EventFeed from "./event-feed"
 import { Bus } from "@opencode/core/bus"
 import { Event } from "@opencode/schema/event"
 import { isOpenCodeEvent, type OpenCodeEvent } from "@opencode/protocol/groups/event"
-import { Cause, Context, Effect, Exit, Layer, Queue, Schema, Scope, Stream } from "effect"
+import { Cause, Context, Effect, Exit, Layer, PubSub, Queue, Schema, Scope, Stream } from "effect"
 
 export const SubscriberCapacity = 4_096
+
+export const HEARTBEAT_FRAME = ": heartbeat\n\n"
+export const HEARTBEAT_INTERVAL = "15 seconds"
 
 export class SubscriberOverflowError extends Schema.TaggedError<SubscriberOverflowError>()(
   "EventFeed.SubscriberOverflow",
@@ -148,4 +151,22 @@ export const layer = <R>(...extensions: ReadonlyArray<Effect.Effect<Extension, n
       const bus = yield* Bus.Service
       return yield* make(bus.listen, { extensions: yield* Effect.all(extensions) })
     }),
+  )
+
+/**
+ * One process-wide heartbeat ticker, started in the caller's scope. Clients read it through `heartbeatStream`, so an
+ * idle client costs no timer.
+ */
+export const heartbeatHub = Effect.fn("EventFeed.heartbeatHub")(function* () {
+  const hub = yield* PubSub.sliding<string>(1)
+  yield* Effect.forkScoped(
+    Effect.forever(Effect.sleep(HEARTBEAT_INTERVAL).pipe(Effect.andThen(PubSub.publish(hub, HEARTBEAT_FRAME)))),
+  )
+  return hub
+})
+
+/** A client's view of the shared ticker: a size-1 sliding queue, so a slow client drops heartbeats instead of queueing them. */
+export const heartbeatStream = (hub: PubSub.PubSub<string>) =>
+  Stream.make(HEARTBEAT_FRAME).pipe(
+    Stream.concat(Stream.unwrap(PubSub.subscribe(hub).pipe(Effect.map(Stream.fromSubscription)))),
   )
