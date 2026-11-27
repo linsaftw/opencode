@@ -278,10 +278,8 @@ SELECT source_id, session_id, ${fold("title")}, ${fold("summary")}, ${fold("user
 // OR and CASE short-circuit, so json_extract never sees invalid JSON.
 const finished = (row: string) =>
   `(${row}.type <> 'assistant' OR NOT json_valid(${row}.data) OR json_extract(${row}.data, '$.time.completed') IS NOT NULL)`
-// The instr() prefilter is a byte scan that rejects a streaming message (no "completed" key) before any JSON parse runs.
-// Every finished message contains that key literally, so the prefilter never drops a row the JSON test would keep.
 const parentFinished = (row: string) =>
-  `EXISTS (SELECT 1 FROM session_message AS m WHERE m.id = ${row}.message_id AND m.type = 'assistant' AND instr(m.data, '"completed"') > 0 AND json_valid(m.data) AND json_extract(m.data, '$.time.completed') IS NOT NULL)`
+  `EXISTS (SELECT 1 FROM session_message AS m WHERE m.id = ${row}.message_id AND m.type = 'assistant' AND json_valid(m.data) AND json_extract(m.data, '$.time.completed') IS NOT NULL)`
 
 const remove = (layout: Layout, id: string) =>
   layout === "compact"

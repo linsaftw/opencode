@@ -230,7 +230,8 @@ const withPrefilter = (raw: Database, prefilter: boolean) => {
   raw.exec(sql)
 }
 
-test("instr prefilter keeps search hits identical on a 50-session corpus", () => {
+// Skipped: the instr prefilter in search-index.ts was reverted (it changes trigger SQL, which needs a Version bump and a live index rebuild).
+test.skip("instr prefilter keeps search hits identical on a 50-session corpus", () => {
   const hits = (prefilter: boolean) => {
     const { raw, db } = open()
     Effect.runSync(SessionSearchIndex.ensure(db as unknown as Db))
