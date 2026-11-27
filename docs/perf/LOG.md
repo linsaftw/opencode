@@ -42,3 +42,22 @@
 - Live composition, 5 s per-thread ticks (service under ~45 workers, ~45% of one core):
   main JS thread 223 (80%), JIT 28 (10%), HTTP client 12, heap helper 10, mi-scav 5 (2%).
   mi-scav is no longer a meaningful share under load. NEXT TARGET: main-thread JS (profile with --cpu-prof on a throwaway instance).
+
+## 2026-11-27 throwaway profile (main JS thread, no code change)
+- Method: `bun --cpu-prof` on a throwaway `serve --port <random>` from source, isolated XDG/HOME under /tmp/claude-1000/prof.
+  Driven ~10 s: 3x session.create, session.list, session.active/info/get x8, SSE /api/event attached 10 s. No provider
+  (no offline scripted fake reachable from the CLI), so no prompt/stream/tool calls. Profile covers ~35 s incl. startup.
+- Tool: scripts/perf/cpuprofile-shares.ts (self-time top N, subsystem heuristic, STACK=1 prints ancestor chain).
+- Composition (share of sampled main-thread time): Effect runtime frames ~44% (effect.js evaluate/orDie/runLoop,
+  Scheduler drain, setImmediate ~5%); video-generation.ts:288 tick ~14% (suspect: 5 s poll cannot cost this much;
+  attribution unverified); SSE/stream writes ~8% (readable resume, writeHeadAndEnd); sqlite ~5% (SqliteClient.js:118);
+  node:vm ~3%; HTTP ~1%; JSON, history, bus, projector each <0.2%; GC not visible as a separate node.
+- Caveat: profile shows ~0 idle samples, so the denominator is sampled time, not wall time. Not representative of a
+  real conversation.
+- Candidates, none fixed (unverified or not safely isolated): (1) packages/core/src/video-generation.ts:288 tick,
+  verify by counting tick entries; (2) packages/core/src/video-generation.ts:278 rows loop; (3)
+  node_modules/@effect/sql-sqlite-bun/dist/SqliteClient.js:118.
+- Stray: an unrelated server already on port 44870 answered 401 to unauthenticated POSTs; left untouched.
+- video-generation tick (kv.scan per idle tick): before 12 scans per simulated minute (one full paged scan per 5 s tick with no running job; test/video-generation-idle.test.ts, measured on HEAD). Layer is makeGlobalNode, so one instance per process, not per Location or session.
+- After: 1 scan per simulated minute while idle (a one-row json_extract probe every 5 s, full scan once a minute for expiry). A new job is read by its first provider status call within 5 s, also when started on another server. Running jobs keep the 5 s scan.
+- Verified: bun test test/video-generation-idle.test.ts test/video-generation.test.ts test/tool-video-generate.test.ts = 5 pass, 0 fail (with --timeout 120000; the existing video tests already exceed Bun's 5 s default on HEAD); bun typecheck clean.

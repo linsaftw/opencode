@@ -14,7 +14,7 @@ import { Model } from "@opencode/schema/model"
 import { makeGlobalNode, Node } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
-import { Clock, Context, Duration, Effect, Fiber, FiberMap, Layer, Option, Schedule, Schema } from "effect"
+import { Clock, Context, Duration, Effect, Fiber, FiberMap, Layer, Option, Ref, Schedule, Schema } from "effect"
 import { BlobStore } from "./blob-store.js"
 import { Database } from "./database/database.js"
 import { Generate } from "./generate.js"
@@ -30,6 +30,8 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("VideoGen
 }) {}
 
 const INTERVAL = Duration.seconds(5)
+/** While no job runs, the full scan that drops expired records runs at this interval; the probe runs every INTERVAL. */
+const IDLE_SCAN = Duration.minutes(1)
 const DEADLINE = Duration.hours(2)
 /** How long a finished job's record is kept. Its videos are blobs, which keep their own week-long retention. */
 const RETENTION = Duration.hours(24)
@@ -88,8 +90,9 @@ const decodeID = Schema.decodeUnknownOption(VideoID)
 
 /**
  * Each job is a record in kv under `video:<id>`, written once the provider accepted it, so a restart resumes polling.
- * Every 5 seconds each server drops records 24 hours after their job finished, and while jobs are running, tries for
- * the lease. The one holding it checks each running job once.
+ * Every 5 seconds each server checks for a running job with a one-row probe. While one runs, each server drops records
+ * 24 hours after their job finished and tries for the lease; the one holding it checks each running job once. While
+ * none runs, the full scan happens only once a minute, so an idle server reads the records rarely.
  */
 const layer = Layer.effect(
   Service,
@@ -308,7 +311,29 @@ const layer = Layer.effect(
         { discard: true },
       )
     })
-    yield* tick.pipe(
+    // Records a full scan last ran at; starts at minus infinity so the first sweep scans.
+    const scanned = yield* Ref.make(Number.NEGATIVE_INFINITY)
+    const sweep = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const due = now - (yield* Ref.get(scanned)) >= Duration.toMillis(IDLE_SCAN)
+      // At most one row, so an idle probe reads nothing but that row's status.
+      const probe = yield* db
+        .select({ key: KVTable.key })
+        .from(KVTable)
+        .where(
+          and(
+            sql`${KVTable.key} like ${PREFIX + "%"}`,
+            sql`json_extract(${KVTable.value}, '$.status') = 'running'`,
+          ),
+        )
+        .limit(1)
+        .get()
+        .pipe(Effect.orDie)
+      if (!due && probe === undefined) return
+      yield* Ref.set(scanned, now)
+      yield* tick
+    })
+    yield* sweep.pipe(
       Effect.ignoreCause({ log: "Error", message: "Video job check failed" }),
       Effect.repeat(Schedule.spaced(INTERVAL)),
       Effect.forkScoped,
