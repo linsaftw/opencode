@@ -1,2 +1,2 @@
-2026-11-27T20:45:14Z
-installed 45a645df02+ (token-economy build, channel latest, v2.4.1); service not restarted by me
+2026-11-27T22:47:22Z
+installed edce398b25+27d4118bbe build (channel latest, v2.4.1); probed offline with scripts/perf/probe-binary.sh; service not restarted by me; baseline 'Background service is unresponsive' warnings in log: 27
