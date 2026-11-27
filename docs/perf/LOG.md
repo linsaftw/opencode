@@ -216,3 +216,5 @@
 - The 16.9% utils.js:3 wrapper is one 4.9 s sample gap at 2.2 s after start (boot); 0.02% of samples by count; 0 repo owners under it.
 - 67.8-69.3% of duration-weighted busy time sits in >50 ms gap samples; duration shares are unreliable for this method.
 - Count-weighted top repo owners are boot-time models-dev.ts:220/235 (~9-13%); conversation window is ~5 s. Next: windowed profile (start at first prompt), count shares.
+- 2026-11-27d windowed (SIGPROF, 400 conv x 4, 7346 samples): 33.5 ms server CPU per conversation; top repo owner Integration.list integration.ts:711 15.3% inclusive via Provider.snapshot provider.ts:469 (proposal, not implemented).
+- Subsystem: Effect 45%, repo:core 27%, sqlite 24%, HTTP 2%. Self top: drizzle _prepare 6.5%, runLoop 3.9%. Tool: scripts/perf/cpuprofile-composition.ts; driver now prints finishedAt.

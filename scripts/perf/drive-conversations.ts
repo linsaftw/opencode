@@ -31,6 +31,7 @@ const created = await fetch(`${base}/api/session`, {
 const sessionID = created.data.id
 
 const timings: number[] = []
+const finishedAt: number[] = []
 for (let index = 0; index < conversations; index++) {
   const started = performance.now()
   const prompt = await fetch(`${base}/api/session/${sessionID}/prompt`, {
@@ -42,6 +43,7 @@ for (let index = 0; index < conversations; index++) {
   const wait = await fetch(`${base}/api/experimental/session/${sessionID}/wait`, { method: "POST", headers: auth })
   if (!wait.ok) throw new Error(`wait ${index + 1} failed: ${wait.status} ${await wait.text()}`)
   timings.push(Math.round(performance.now() - started))
+  finishedAt.push(Date.now())
 }
 
 const messages = (await fetch(`${base}/api/session/${sessionID}/message`, { headers: auth }).then((response) => response.json())) as {
@@ -50,4 +52,4 @@ const messages = (await fetch(`${base}/api/session/${sessionID}/message`, { head
 controller.abort()
 await stream
 
-console.log(JSON.stringify({ sessionID, conversationMs: timings, persistedMessages: messages.data?.length ?? null, sse }))
+console.log(JSON.stringify({ sessionID, conversationMs: timings, finishedAt, persistedMessages: messages.data?.length ?? null, sse }))
