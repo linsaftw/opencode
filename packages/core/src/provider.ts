@@ -341,6 +341,13 @@ export interface Interface extends State.Transformable<Editor> {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Provider") {}
 
+// Infos sealed by their producer are deeply frozen, so every replay shares one object instead of cloning it.
+const sealed = new WeakSet<object>()
+export function seal<T extends Info>(info: T): T {
+  sealed.add(freeze(info, true))
+  return info
+}
+
 // Every location references the same index for a shared immutable definition array.
 const definitions = new WeakMap<readonly Model.Info[], Map<ID, ReadonlyMap<Model.ID, Model.Info>>>()
 function index(providerID: ID, models: readonly Model.Info[]) {
@@ -410,13 +417,15 @@ const layer = Layer.effect(
           list: () => Array.from(records.values()),
           get: (id) => records.get(id),
           add: (definition) => {
+            // A sealed info is immutable, so the record stays shared and `own` clones it on the first write.
+            const shared = sealed.has(definition.info)
             const added = {
-              provider: structuredClone(definition.info) as MutableInfo,
+              provider: (shared ? definition.info : structuredClone(definition.info)) as MutableInfo,
               models: index(definition.info.id, definition.models),
               sourceConnection: definition.sourceConnection,
             }
             records.set(definition.info.id, added)
-            ownedRecords.add(added)
+            if (!shared) ownedRecords.add(added)
           },
           update: (id, update) => {
             const record = own(id)

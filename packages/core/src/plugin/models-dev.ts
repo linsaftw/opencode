@@ -6,6 +6,7 @@ import { Bus } from "../bus.js"
 import { Flag } from "../flag.js"
 import { Model } from "../model.js"
 import { ModelsDev } from "../models-dev.js"
+import { seal } from "../provider.js"
 
 // These catalog entries require inference profiles on Bedrock Runtime.
 // Opus/Sonnet 4.6 and Opus 5.5 support in-region calls in eu-west-2 and must remain available.
@@ -62,10 +63,7 @@ export const ModelsDevPlugin = define({
     })
     yield* ctx.provider.transform((providers) => {
       for (const provider of loaded.data) {
-        providers.add({
-          info: { ...provider.info, integrationID: Integration.ID.make(provider.info.id) },
-          models: provider.models,
-        })
+        providers.add({ info: sealedInfo(provider.info), models: provider.models })
       }
     })
     const apply = (data: readonly ModelsDev.Snapshot[]) => {
@@ -91,6 +89,16 @@ export const ModelsDevPlugin = define({
 })
 
 const prepared = new WeakMap<readonly ModelsDev.Snapshot[], readonly ModelsDev.Snapshot[]>()
+
+// One sealed object per catalog entry, so each transform replay shares it instead of cloning it.
+const sealedInfos = new WeakMap<ModelsDev.Snapshot["info"], ModelsDev.Snapshot["info"]>()
+function sealedInfo(info: ModelsDev.Snapshot["info"]) {
+  const cached = sealedInfos.get(info)
+  if (cached) return cached
+  const result = seal({ ...info, integrationID: Integration.ID.make(info.id) })
+  sealedInfos.set(info, result)
+  return result
+}
 
 function snapshots(data: readonly ModelsDev.Snapshot[]) {
   const cached = prepared.get(data)
