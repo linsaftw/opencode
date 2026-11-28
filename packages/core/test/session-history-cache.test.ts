@@ -119,3 +119,24 @@ it.effect("cached history matches uncached decode across prompts, compaction, ed
     expect(reverted.entries.length).toBe(compacted.entries.length - 1)
   }),
 )
+
+// Scoped cost probe: warm (fully cached) history reads at two sizes show how per-step cost grows with N.
+it.effect("warm history read cost per step at 50 and 500 messages", () =>
+  Effect.gen(function* () {
+    const s = yield* setup
+    yield* s.prepare
+    const measure = Effect.fnUntraced(function* () {
+      yield* s.load()
+      const started = performance.now()
+      for (let i = 0; i < 20; i++) yield* s.load()
+      return (performance.now() - started) / 20
+    })
+    for (let i = 0; i < 50; i++) yield* s.prompt(`m${i}`)
+    const small = yield* measure()
+    for (let i = 50; i < 500; i++) yield* s.prompt(`m${i}`)
+    const large = yield* measure()
+    console.log(`warm load ms/step: N=50 ${small.toFixed(2)} N=500 ${large.toFixed(2)} ratio ${(large / small).toFixed(1)}`)
+    expect(large).toBeGreaterThan(0)
+  }),
+  { timeout: 60_000 },
+)
