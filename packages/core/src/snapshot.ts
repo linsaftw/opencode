@@ -181,6 +181,8 @@ const layer = Layer.effect(
     })
 
     const files = Effect.fn("Snapshot.files")(function* (input: CompareInput) {
+      // Tree ids are content-addressed, so identical trees differ in nothing and need no git process.
+      if (input.from === input.to) return []
       const compared = yield* comparison("files", input)
       const changed = yield* git.tree
         .files({ repository: compared.repository, from: compared.from, to: compared.to })
@@ -191,7 +193,7 @@ const layer = Layer.effect(
     })
 
     const diff = Effect.fn("Snapshot.diff")(function* (input: DiffInput) {
-      if (input.paths?.length === 0) return []
+      if (input.paths?.length === 0 || input.from === input.to) return []
       const compared = yield* comparison("diff", input)
       // Only an explicit selection becomes a pathspec; ignored paths are dropped from the result instead.
       const diffs = yield* git.tree
