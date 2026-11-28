@@ -6,8 +6,10 @@ import { ModelsDev } from "@opencode/schema/models-dev"
 import { Money } from "@opencode/schema/money"
 import { FreeformFormat } from "@opencode/schema/tool"
 import { App } from "./app.js"
+import path from "path"
 import { Hash } from "@opencode/util/hash"
 import { FSUtil } from "@opencode/util/fs-util"
+import { Global } from "@opencode/util/global"
 import { Bus } from "./bus.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
@@ -722,15 +724,12 @@ export const decodeSnapshot = (text: string, recommended = false) =>
 // host many runtimes (Cloudflare colocates Durable Object instances), so
 // per-runtime decoding would multiply the cost.
 const bundledCache = new Map<boolean, readonly Snapshot[]>()
-const bundledSnapshot = (recommended: boolean) =>
-  Effect.suspend(() => {
-    const cached = bundledCache.get(recommended)
-    return cached
-      ? Effect.succeed(cached)
-      : decodeSnapshot(snapshotText, recommended).pipe(
-          Effect.tap((snapshot) => Effect.sync(() => bundledCache.set(recommended, snapshot))),
-        )
-  })
+
+// Bump when the normalization below changes its output for the same catalog. The memo key also covers the running
+// binary and this source file, so a rebuild or an edit invalidates it even without a bump.
+const NORMALIZED_VERSION = 1
+const StoredNormalized = Schema.fromJsonString(Schema.Struct({ key: Schema.String, snapshots: Schema.Unknown }))
+const decodeStoredNormalized = Schema.decodeUnknownOption(StoredNormalized)
 
 // Versioned so an entry cached for another catalog query is never read: v1 was the v1 API, v2 had no realtime models,
 // v3 no embedding or transcription models.
@@ -751,6 +750,7 @@ export const layer = (options?: Options) =>
       const bus = yield* Bus.Service
       const app = yield* App.Service
       const kv = yield* KV.Service
+      const global = yield* Global.Service
       const http = (yield* HttpClient.HttpClient).pipe(
         HttpClient.retryTransient({
           retryOn: "errors-and-responses",
@@ -823,6 +823,41 @@ export const layer = (options?: Options) =>
           )
         : Effect.undefined
 
+      // Decoding the multi-MB catalog costs most of a cold boot, and each process boot repeats it. The normalized
+      // result is kept in one file per flag, keyed by the catalog digest, today's date (service-tier multipliers
+      // depend on it), and the binary and source identity. A missing, unreadable or mismatched file rebuilds it.
+      const normalizeMemo = Effect.fnUntraced(function* (
+        digest: string | undefined,
+        catalog: Record<string, unknown>,
+        recommended: boolean,
+      ) {
+        if (digest === undefined) return yield* normalize(catalog, recommended)
+        const binary = Bun.file(process.execPath)
+        const source = Bun.file(new URL(import.meta.url))
+        const today = new Date().toISOString().slice(0, 10)
+        const key = Hash.sha256(
+          [NORMALIZED_VERSION, binary.size, binary.lastModified, source.size, source.lastModified, today, recommended, digest].join("\n"),
+        )
+        const file = path.join(global.cache, "models-dev", recommended ? "normalized-recommended.json" : "normalized.json")
+        const text = yield* fs.readFileStringSafe(file).pipe(Effect.orElseSucceed(() => undefined))
+        const stored = text === undefined ? undefined : Option.getOrUndefined(decodeStoredNormalized(text))
+        if (stored?.key === key) return stored.snapshots as readonly Snapshot[]
+        const snapshots = yield* normalize(catalog, recommended)
+        yield* fs.writeWithDirs(file, JSON.stringify({ key, snapshots })).pipe(Effect.ignore)
+        return snapshots
+      })
+
+      const bundledSnapshot = (recommended: boolean) =>
+        Effect.suspend(() => {
+          const cached = bundledCache.get(recommended)
+          return cached
+            ? Effect.succeed(cached)
+            : decodeCatalog(snapshotText).pipe(
+                Effect.flatMap((catalog) => normalizeMemo(bodyDigest(snapshotText), catalog, recommended)),
+                Effect.tap((snapshot) => Effect.sync(() => bundledCache.set(recommended, snapshot))),
+              )
+        })
+
       const writeMeta = (updatedAt: number, digest: string | undefined, etag: string | undefined) =>
         kv.set(metaKey, { updatedAt, ...(digest ? { digest } : {}), ...(etag ? { etag } : {}) })
 
@@ -857,7 +892,7 @@ export const layer = (options?: Options) =>
         const fromFile = yield* loadFromFile
         if (fromFile) return yield* normalize(fromFile, recommended)
         const cached = options?.file ? undefined : yield* loadFromCache()
-        if (cached) return yield* normalize(cached.catalog, recommended)
+        if (cached) return yield* normalizeMemo(cached.digest, cached.catalog, recommended)
         // The bundled snapshot is the boot-time floor until the periodic fetch refreshes it.
         const bundled = options?.snapshot === false ? undefined : yield* bundledSnapshot(recommended)
         if (bundled) return bundled
@@ -920,7 +955,7 @@ export function configured(options?: Options) {
   return makeGlobalNode({
     service: Service,
     layer: layer(options),
-    deps: [FSUtil.node, Bus.node, App.node, KV.node, httpClient],
+    deps: [FSUtil.node, Bus.node, App.node, KV.node, Global.node, httpClient],
   })
 }
 
