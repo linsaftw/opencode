@@ -26,7 +26,13 @@ import { makeMachine, makeMachineLink } from "./machine"
 import { makeMediaGet } from "./media"
 import { makePush } from "./push"
 import { makeSpace } from "./space"
-import { type Outbound, runPtySocket } from "./pty-socket"
+import {
+  offerOutbound,
+  OUTBOX_CAPACITY,
+  type Outbound,
+  OutboxOverflowError,
+  runPtySocket,
+} from "./pty-socket"
 
 export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experimental", (handlers) =>
   Effect.gen(function* () {
@@ -191,7 +197,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
           if (!Number.isSafeInteger(cursor) || cursor < 0) return HttpServerResponse.empty({ status: 400 })
 
           const socket = yield* Effect.orDie(ctx.request.upgrade)
-          const outbox = yield* Queue.unbounded<Outbound>()
+          const outbox = yield* Queue.bounded<Outbound, OutboxOverflowError>(OUTBOX_CAPACITY)
           let attachment: PersistentPty.Attachment | undefined
           // Bun's native ws upgrade must start before asynchronous daemon I/O.
           const onOpen = Effect.gen(function* () {
@@ -202,16 +208,16 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
                 role,
                 takeover: url.searchParams.get("takeover") === "true",
                 onEvent: (event) => {
-                  if (event.type === "output") Queue.offerUnsafe(outbox, event.data)
+                  if (event.type === "output") offerOutbound(outbox, event.data)
                   if (event.type === "resized")
-                    Queue.offerUnsafe(
+                    offerOutbound(
                       outbox,
                       JSON.stringify({ ...event, checkpoint: Buffer.from(event.checkpoint).toString("base64") }),
                     )
                   if (event.type !== "output" && event.type !== "resized")
-                    Queue.offerUnsafe(outbox, JSON.stringify(event))
+                    offerOutbound(outbox, JSON.stringify(event))
                 },
-                onEnd: () => Queue.offerUnsafe(outbox, new Socket.CloseEvent(1000)),
+                onEnd: () => offerOutbound(outbox, new Socket.CloseEvent(1000)),
               })
               .pipe(
                 Effect.catchTags({
@@ -220,11 +226,11 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
                 }),
               )
             if (!attachment) {
-              Queue.offerUnsafe(outbox, new Socket.CloseEvent(4404, "terminal unavailable"))
+              offerOutbound(outbox, new Socket.CloseEvent(4404, "terminal unavailable"))
               return
             }
 
-            Queue.offerUnsafe(
+            offerOutbound(
               outbox,
               JSON.stringify({
                 type: "attached",
@@ -241,8 +247,8 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
                 },
               }),
             )
-            if (attachment.replay.data.length > 0) Queue.offerUnsafe(outbox, attachment.replay.data)
-            Queue.offerUnsafe(
+            if (attachment.replay.data.length > 0) offerOutbound(outbox, attachment.replay.data)
+            offerOutbound(
               outbox,
               JSON.stringify({ type: "replay_complete", endOffset: attachment.replay.endOffset }),
             )

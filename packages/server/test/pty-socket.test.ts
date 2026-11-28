@@ -1,8 +1,14 @@
 import { expect } from "bun:test"
-import { Effect, Exit, Fiber, Queue } from "effect"
+import { Deferred, Effect, Exit, Fiber, Queue } from "effect"
 import { Socket } from "effect/socket"
 import { it } from "../../core/test/lib/effect"
-import { type Outbound, runPtySocket } from "../src/handlers/pty-socket"
+import {
+  OUTBOX_CAPACITY,
+  offerOutbound,
+  type Outbound,
+  OutboxOverflowError,
+  runPtySocket,
+} from "../src/handlers/pty-socket"
 
 const connection = Effect.gen(function* () {
   const inbound = yield* Queue.unbounded<string | Uint8Array, Socket.SocketError>()
@@ -85,5 +91,72 @@ it.live("detaches when interrupted", () =>
 
     expect(pty.state.opened).toBeTrue()
     expect(pty.state.detached).toBeTrue()
+  }),
+)
+
+it.live("closes a slow client whose bounded outbox overflows, without blocking the producer", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>()
+    const inbound = yield* Queue.unbounded<string | Uint8Array, Socket.SocketError>()
+    const outbox = yield* Queue.bounded<Outbound, OutboxOverflowError>(OUTBOX_CAPACITY)
+    const written: Outbound[] = []
+    let detached = false
+    const socket = Socket.make({
+      reader: Effect.succeed({
+        pull: Queue.take(inbound).pipe(Effect.map((message) => [message] as const)),
+        upgrade: Socket.SocketUpgradeError.unsupported,
+      }),
+      writer: Effect.succeed({
+        write: (chunk) =>
+          Deferred.await(gate).pipe(Effect.andThen(Effect.sync(() => void written.push(chunk)))),
+        writeAll: (chunks) =>
+          Deferred.await(gate).pipe(Effect.andThen(Effect.sync(() => void written.push(...chunks)))),
+      }),
+    })
+
+    // The client never drains, so every offer past capacity must overflow instead of growing the queue.
+    for (let i = 0; i < OUTBOX_CAPACITY + 10_000; i++) offerOutbound(outbox, "frame")
+    const run = yield* runPtySocket({
+      socket,
+      outbox,
+      onMessage: () => Effect.void,
+      detach: () => {
+        detached = true
+      },
+    }).pipe(Effect.forkChild)
+    yield* Deferred.succeed(gate, undefined)
+
+    expect(yield* Fiber.await(run).pipe(Effect.map(Exit.isSuccess))).toBeTrue()
+    expect(written).toHaveLength(1)
+    expect(written[0]).toBeInstanceOf(Socket.CloseEvent)
+    expect((written[0] as Socket.CloseEvent).code).toBe(1013)
+    expect(detached).toBeTrue()
+  }),
+)
+
+it.live("delivers every frame to a healthy client filling the outbox to capacity", () =>
+  Effect.gen(function* () {
+    const inbound = yield* Queue.unbounded<string | Uint8Array, Socket.SocketError>()
+    const outbox = yield* Queue.bounded<Outbound, OutboxOverflowError>(OUTBOX_CAPACITY)
+    const frames: Outbound[] = Array.from({ length: OUTBOX_CAPACITY - 1 }, (_, i) => `frame-${i}`)
+    const close = new Socket.CloseEvent(1000)
+    const written: Outbound[] = []
+    const socket = Socket.make({
+      reader: Effect.succeed({
+        pull: Queue.take(inbound).pipe(Effect.map((message) => [message] as const)),
+        upgrade: Socket.SocketUpgradeError.unsupported,
+      }),
+      writer: Effect.succeed({
+        write: (chunk) => Effect.sync(() => void written.push(chunk)),
+        writeAll: (chunks) => Effect.sync(() => void written.push(...chunks)),
+      }),
+    })
+    for (const frame of frames) offerOutbound(outbox, frame)
+    offerOutbound(outbox, close)
+
+    expect(yield* Effect.exit(runPtySocket({ socket, outbox, onMessage: () => Effect.void, detach: () => {} }))).toEqual(
+      Exit.void,
+    )
+    expect(written).toEqual([...frames, close])
   }),
 )

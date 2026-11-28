@@ -16,7 +16,14 @@ import {
   PTY_CONNECT_TOKEN_HEADER_VALUE,
 } from "@opencode/protocol/groups/pty"
 import { locationErrors, requestRef, response } from "../location"
-import { holdLocation, type Outbound, runPtySocket } from "./pty-socket"
+import {
+  holdLocation,
+  offerOutbound,
+  OUTBOX_CAPACITY,
+  type Outbound,
+  OutboxOverflowError,
+  runPtySocket,
+} from "./pty-socket"
 
 const notFound = (ptyID: Pty.ID) => new PtyNotFoundError({ ptyID, message: `PTY session not found: ${ptyID}` })
 
@@ -136,29 +143,29 @@ export const PtyHandler = HttpApiBuilder.group(Api, "server.pty", (handlers) =>
 
             const socket = yield* Effect.orDie(ctx.request.upgrade)
             // TODO: Integrate graceful-shutdown socket tracking before clients migrate to this route.
-            const outbox = yield* Queue.unbounded<Outbound>()
+            const outbox = yield* Queue.bounded<Outbound, OutboxOverflowError>(OUTBOX_CAPACITY)
             yield* holdLocation(outbox)
             const attachment = yield* pty
               .attach(ctx.params.ptyID, {
                 cursor,
-                onData: (chunk) => Queue.offerUnsafe(outbox, chunk),
-                onEnd: () => Queue.offerUnsafe(outbox, new Socket.CloseEvent(1000)),
+                onData: (chunk) => offerOutbound(outbox, chunk),
+                onEnd: () => offerOutbound(outbox, new Socket.CloseEvent(1000)),
               })
               .pipe(
                 Effect.catchTags({
                   "Pty.NotFoundError": () =>
                     Effect.sync(() => {
-                      Queue.offerUnsafe(outbox, new Socket.CloseEvent(4404, "session not found"))
+                      offerOutbound(outbox, new Socket.CloseEvent(4404, "session not found"))
                     }),
                   "Pty.ExitedError": () =>
                     Effect.sync(() => {
-                      Queue.offerUnsafe(outbox, new Socket.CloseEvent(4404, "session exited"))
+                      offerOutbound(outbox, new Socket.CloseEvent(4404, "session exited"))
                     }),
                 }),
               )
             if (attachment) {
-              for (const chunk of PtyProtocol.chunks(attachment.replay)) Queue.offerUnsafe(outbox, chunk)
-              Queue.offerUnsafe(outbox, PtyProtocol.metaFrame(attachment.cursor))
+              for (const chunk of PtyProtocol.chunks(attachment.replay)) offerOutbound(outbox, chunk)
+              offerOutbound(outbox, PtyProtocol.metaFrame(attachment.cursor))
               attachment.activate()
             }
 

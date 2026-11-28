@@ -11,7 +11,14 @@ import { Socket } from "effect/socket"
 import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
 import { locationErrors, requestRef, response } from "../location"
-import { holdLocation, type Outbound, runPtySocket } from "./pty-socket"
+import {
+  holdLocation,
+  offerOutbound,
+  OUTBOX_CAPACITY,
+  type Outbound,
+  OutboxOverflowError,
+  runPtySocket,
+} from "./pty-socket"
 
 const notFound = <A, R>(effect: Effect.Effect<A, Mcp.NotFoundError, R>) =>
   effect.pipe(Effect.mapError((error) => new McpServerNotFoundError({ server: error.server, message: error.message })))
@@ -111,15 +118,15 @@ export const McpHandler = HttpApiBuilder.group(Api, "server.mcp", (handlers) =>
             const mcp = yield* Mcp.Service
             const { McpSocketClient } = yield* Effect.promise(() => import("@opencode/core/mcp/socket-client"))
             const socket = yield* Effect.orDie(ctx.request.upgrade)
-            const outbox = yield* Queue.unbounded<Outbound>()
+            const outbox = yield* Queue.bounded<Outbound, OutboxOverflowError>(OUTBOX_CAPACITY)
             yield* holdLocation(outbox)
             const state = { attached: false, disconnected: false }
             const transport = McpSocketClient.make({
-              send: (text) => Queue.offerUnsafe(outbox, text),
+              send: (text) => offerOutbound(outbox, text),
               // A failed attach closes the transport before reporting the error; ignore that close so the
               // socket closes with 1011 below instead of a normal 1000.
               close: (code, reason) => {
-                if (state.attached) Queue.offerUnsafe(outbox, new Socket.CloseEvent(code, reason))
+                if (state.attached) offerOutbound(outbox, new Socket.CloseEvent(code, reason))
               },
             })
             const decoder = new TextDecoder()
@@ -135,7 +142,7 @@ export const McpHandler = HttpApiBuilder.group(Api, "server.mcp", (handlers) =>
                   ? Effect.logInfo("client MCP disconnected during initialize", { name, error: error.message })
                   : Effect.logError("client MCP attach failed", { name, error: error.message }).pipe(
                       Effect.andThen(
-                        Effect.sync(() => Queue.offerUnsafe(outbox, new Socket.CloseEvent(1011, "attach failed"))),
+                        Effect.sync(() => offerOutbound(outbox, new Socket.CloseEvent(1011, "attach failed"))),
                       ),
                     ),
               ),
