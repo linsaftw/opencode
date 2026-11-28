@@ -269,3 +269,8 @@ Note: early probes before the proxy guard (try3, the first 3 bench trials, one s
 2026-11-28 models-dev memo (prof13): ModelsDev.get on KV-cached catalog (10947 models, 329 providers, 10.3 MB), median of 20 in one process: normalize 626 ms wall / 689 ms CPU -> memo hit 207 ms / 219 ms; JSON dump byte-identical (27.7 MB each, before vs after).
 2026-11-28 models-dev memo cold boot (source serve --stdio, /proc utime+stime, interleaved before/after pairs, median of 5, load 15-19): shared XDG_CACHE 3.56 -> 3.36 CPU s; fresh cache 3.78 -> 3.61 CPU s, inside noise; the 0.4 s microbench saving is only partly visible at boot.
 2026-11-28 change: packages/core/src/models-dev.ts normalizeMemo (XDG_CACHE_HOME/models-dev/normalized{,-recommended}.json; key = catalog digest, date, binary and source stat, NORMALIZED_VERSION=1; Global.node dep); probe packages/core/test/perf-models-dev-decode.test.ts; scripts/perf/serve-boot-cpu.sh. typecheck clean; models.test.ts orig 29 pass/4 fail, new 4 fail (ETag/legacy/stale/quiet, pre-existing timeouts); full new-run fail list not re-captured.
+
+## 2026-11-28 history reload audit (read-only, no code change)
+- session/history.ts:230-283 messageEntries: per step selects all rows since latest compaction, hydrates parts/blobs, JSON.stringify([type,data]) per row even on decode-cache hit: O(N) per step. Candidate: version key from (time_updated, part count) or seq-tail incremental load; needs scoped N=50/500 bench before landing.
+- hy4/deepseek free-model delegate probes all timed out at load 8-52 (10 s probe vs ~5 CPU s opencode run startup); no agents ran.
+- Load 52 at 22:15: measurements deferred.
