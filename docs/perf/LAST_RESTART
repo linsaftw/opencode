@@ -1,2 +1,2 @@
-2026-11-28T11:58:14Z
-install-canonical of a14a1529fa build (adds 701fa54570 watcher debug logs, a943a70edf sealed provider infos, 85ebc5dc7c policy early-return); PROBE-OK (conversationMs 7262 cold under load, 88 warm).
+2026-11-28T12:29:09Z
+install-canonical of the f9eb3e5aaf build (adds OPENCODE_DISABLE_MCP opt-out on top of 701fa54570, a943a70edf, 85ebc5dc7c); PROBE-OK at 12:10Z. Live service pid 1108514 not restarted by me.
