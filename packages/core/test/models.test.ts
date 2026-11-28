@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import fs from "fs"
+import path from "path"
 import { Money } from "@opencode/schema/money"
 import { Effect, Exit, Fiber, Layer, Ref, Scope, Stream, Tracer } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
@@ -13,6 +15,7 @@ import { bodyDigest, ModelsDev } from "@opencode/core/models-dev"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { SessionUsage } from "@opencode/core/session/usage"
+import { Global } from "@opencode/util/global"
 import { location } from "./fixture/location"
 import { it } from "./lib/effect"
 
@@ -1446,6 +1449,71 @@ describe("ModelsDev Service", () => {
       // retryTransient retries 5xx, so calls may be > 1.
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBeGreaterThanOrEqual(1)
+    }),
+  )
+})
+
+describe("ModelsDev normalized memo", () => {
+  const memoDir = path.join(Global.Path.cache, "models-dev")
+  const memoFiles = () =>
+    fs.existsSync(memoDir)
+      ? fs.readdirSync(memoDir).filter((name) => /^normalized-[0-9a-f]{16}\.json$/.test(name))
+      : []
+  const fileWith = (marker: string) =>
+    memoFiles()
+      .map((name) => path.join(memoDir, name))
+      .find((file) => fs.readFileSync(file, "utf8").includes(marker))
+
+  // Each call builds a fresh layer, like a new process: only the on-disk memo carries over.
+  const getWith = (catalog: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const cache = makeCache()
+      writeCache(cache, catalog)
+      const state = yield* Ref.make(initialState)
+      return yield* provided(state, cache, ModelsDev.Service.use((service) => service.get()))
+    })
+
+  it.live("alternating catalogs keep both memo files, so the second A and second B are hits", () =>
+    Effect.gen(function* () {
+      fs.rmSync(memoDir, { recursive: true, force: true })
+      expect(yield* getWith(fixture)).toEqual(fixtureSnapshot)
+      expect(yield* getWith(fixture2)).toEqual(fixture2Snapshot)
+      expect(memoFiles().length).toBe(2)
+      // Marking each stored snapshot shows a hit: a rebuild would return the real names again.
+      const fileA = fileWith('"Acme One"') as string
+      const fileB = fileWith('"Beta One"') as string
+      fs.writeFileSync(fileA, fs.readFileSync(fileA, "utf8").replaceAll('"Acme One"', '"Memo A"'))
+      fs.writeFileSync(fileB, fs.readFileSync(fileB, "utf8").replaceAll('"Beta One"', '"Memo B"'))
+      expect(JSON.stringify(yield* getWith(fixture))).toContain('"Memo A"')
+      expect(JSON.stringify(yield* getWith(fixture2))).toContain('"Memo B"')
+      expect(memoFiles().length).toBe(2)
+    }),
+  )
+
+  it.live("keeps only the newest 4 memo files per flag", () =>
+    Effect.gen(function* () {
+      fs.rmSync(memoDir, { recursive: true, force: true })
+      for (const n of [1, 2, 3, 4, 5, 6]) {
+        yield* getWith({ acme: { ...fixture.acme, models: { "acme-1": sourceModel("acme-1", { name: `Acme ${n}` }) } } })
+        // Distinct mtimes keep the newest-first order deterministic.
+        yield* Effect.sleep("10 millis")
+      }
+      expect(memoFiles().length).toBe(4)
+      expect(fileWith('"Acme 6"')).toBeDefined()
+      expect(fileWith('"Acme 1"')).toBeUndefined()
+    }),
+  )
+
+  it.live("a corrupted memo file rebuilds to the same output", () =>
+    Effect.gen(function* () {
+      fs.rmSync(memoDir, { recursive: true, force: true })
+      const first = yield* getWith(fixture)
+      const file = path.join(memoDir, memoFiles()[0] as string)
+      fs.writeFileSync(file, "{truncated")
+      const second = yield* getWith(fixture)
+      expect(second).toEqual(first)
+      expect(second).toEqual(fixtureSnapshot)
+      expect(fs.readFileSync(file, "utf8")).toContain('"Acme One"')
     }),
   )
 })

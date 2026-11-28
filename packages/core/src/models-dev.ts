@@ -824,8 +824,10 @@ export const layer = (options?: Options) =>
         : Effect.undefined
 
       // Decoding the multi-MB catalog costs most of a cold boot, and each process boot repeats it. The normalized
-      // result is kept in one file per flag, keyed by the catalog digest, today's date (service-tier multipliers
-      // depend on it), and the binary and source identity. A missing, unreadable or mismatched file rebuilds it.
+      // result is kept in one file per key, so alternating binaries or sources (each with its own key) keep their own
+      // entries instead of evicting each other. The key covers the catalog digest, today's date (service-tier
+      // multipliers depend on it), and the binary and source identity. A write keeps the newest 4 files per flag. A
+      // missing, unreadable or mismatched file rebuilds it.
       const normalizeMemo = Effect.fnUntraced(function* (
         digest: string | undefined,
         catalog: Record<string, unknown>,
@@ -838,12 +840,35 @@ export const layer = (options?: Options) =>
         const key = Hash.sha256(
           [NORMALIZED_VERSION, binary.size, binary.lastModified, source.size, source.lastModified, today, recommended, digest].join("\n"),
         )
-        const file = path.join(global.cache, "models-dev", recommended ? "normalized-recommended.json" : "normalized.json")
+        const dir = path.join(global.cache, "models-dev")
+        const prefix = recommended ? "normalized-recommended" : "normalized"
+        const file = path.join(dir, `${prefix}-${key.slice(0, 16)}.json`)
         const text = yield* fs.readFileStringSafe(file).pipe(Effect.orElseSucceed(() => undefined))
         const stored = text === undefined ? undefined : Option.getOrUndefined(decodeStoredNormalized(text))
         if (stored?.key === key) return stored.snapshots as readonly Snapshot[]
         const snapshots = yield* normalize(catalog, recommended)
-        yield* fs.writeWithDirs(file, JSON.stringify({ key, snapshots })).pipe(Effect.ignore)
+        const memoName = new RegExp(`^${prefix}-[0-9a-f]{16}\\.json$`)
+        yield* fs.writeWithDirs(file, JSON.stringify({ key, snapshots })).pipe(
+          Effect.andThen(
+            Effect.gen(function* () {
+              // The pre-per-key single file is no longer read; drop it so it does not linger.
+              yield* fs.remove(path.join(dir, `${prefix}.json`), { force: true })
+              const names = (yield* fs.readDirectory(dir)).filter((name) => memoName.test(name))
+              const entries = yield* Effect.forEach(names, (name) =>
+                Effect.map(fs.stat(path.join(dir, name)), (info) => ({
+                  name,
+                  mtime: Option.getOrElse(info.mtime, () => new Date(0)).getTime(),
+                })),
+              )
+              yield* Effect.forEach(
+                entries.toSorted((a, b) => b.mtime - a.mtime).slice(4),
+                (entry) => fs.remove(path.join(dir, entry.name)),
+                { discard: true },
+              )
+            }),
+          ),
+          Effect.ignore,
+        )
         return snapshots
       })
 
