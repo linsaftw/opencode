@@ -102,7 +102,7 @@ export const layer = (options?: Options) =>
                 subscription
                   ? Effect.promise(() => subscription.unsubscribe()).pipe(
                       Effect.ignoreCause,
-                      Effect.andThen(Effect.logInfo("watcher stopped", { path: key.target, type: key.type })),
+                      Effect.andThen(Effect.logDebug("watcher stopped", { path: key.target, type: key.type })),
                     )
                   : Effect.void,
               // Native subscription may stay pending up to SUBSCRIBE_TIMEOUT_MS;
@@ -114,7 +114,7 @@ export const layer = (options?: Options) =>
               yield* PubSub.shutdown(pubsub)
               return pubsub
             }
-            yield* Effect.logInfo("watcher started", {
+            yield* Effect.logDebug("watcher started", {
               path: key.target,
               type: key.type,
               backend: subscription.backend,
@@ -128,7 +128,7 @@ export const layer = (options?: Options) =>
         const target = path.resolve(input.path)
         const ignore = [...new Set(input.type === "directory" ? (input.ignore ?? []) : [])].toSorted()
         const names = [...new Set(input.type === "entries" ? input.names : [])].toSorted()
-        yield* Effect.logInfo("watcher subscribe", {
+        yield* Effect.logDebug("watcher subscribe", {
           path: target,
           type: input.type,
           ignores: ignore.length,
