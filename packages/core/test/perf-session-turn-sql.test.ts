@@ -319,6 +319,9 @@ it.effect(
             .map((row) => `${(row.ms / totalMs * 100).toFixed(1).padStart(5)}% ${row.ms.toFixed(2).padStart(8)}ms x${row.count} ${row.norm.slice(0, 140)}`)
             .join("\n") + `\nTOTAL statements=${totalCount} ms=${totalMs.toFixed(2)} tx=${transactions} wall=${wallMs.toFixed(1)} heapDelta=${heapAfter - heapBefore}`,
         )
+        // Regression guard for the bus duplicate-id check folded into the event insert (was 22 pre-selects).
+        expect(totalCount).toBeLessThanOrEqual(163)
+        expect(transactions).toBeLessThanOrEqual(24)
         expect(dump.events.length).toBeGreaterThan(0)
         expect(dump.messages.length).toBeGreaterThan(0)
       }),

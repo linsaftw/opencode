@@ -404,21 +404,6 @@ export function configured(options?: Options) {
                             }),
                           )
                         }
-                        if (persist) {
-                          const stored = yield* db
-                            .select({ aggregateID: EventTable.aggregate_id, seq: EventTable.seq })
-                            .from(EventTable)
-                            .where(eq(EventTable.id, event.id))
-                            .get()
-                            .pipe(Effect.orDie)
-                          if (stored)
-                            yield* Effect.die(
-                              new InvalidDurableEventError({
-                                type: event.type,
-                                message: `Event ${event.id} already exists at aggregate ${stored.aggregateID} sequence ${stored.seq}`,
-                              }),
-                            )
-                        }
                         const committed = {
                           ...event,
                           durable: { aggregateID, seq, version: durable.version },
@@ -440,8 +425,10 @@ export function configured(options?: Options) {
                           })
                           .run()
                           .pipe(Effect.orDie)
-                        if (persist)
-                          yield* db
+                        // The duplicate-id check rides on the insert (no pre-select on the happy path);
+                        // the stored row is read only to build the error when the id already exists.
+                        if (persist) {
+                          const inserted = yield* db
                             .insert(EventTable)
                             .values([
                               {
@@ -453,8 +440,25 @@ export function configured(options?: Options) {
                                 data: encode(),
                               },
                             ])
-                            .run()
+                            .onConflictDoNothing({ target: EventTable.id })
+                            .returning({ id: EventTable.id })
+                            .all()
                             .pipe(Effect.orDie)
+                          if (inserted.length === 0) {
+                            const stored = yield* db
+                              .select({ aggregateID: EventTable.aggregate_id, seq: EventTable.seq })
+                              .from(EventTable)
+                              .where(eq(EventTable.id, event.id))
+                              .get()
+                              .pipe(Effect.orDie)
+                            yield* Effect.die(
+                              new InvalidDurableEventError({
+                                type: event.type,
+                                message: `Event ${event.id} already exists at aggregate ${stored?.aggregateID} sequence ${stored?.seq}`,
+                              }),
+                            )
+                          }
+                        }
                         return { aggregateID, seq, event: committed, route }
                       }),
                     { behavior: "immediate" },
