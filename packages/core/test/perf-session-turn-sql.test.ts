@@ -320,7 +320,7 @@ it.effect(
             .join("\n") + `\nTOTAL statements=${totalCount} ms=${totalMs.toFixed(2)} tx=${transactions} wall=${wallMs.toFixed(1)} heapDelta=${heapAfter - heapBefore}`,
         )
         // Regression guard for the bus duplicate-id check folded into the event insert (was 22 pre-selects).
-        expect(totalCount).toBeLessThanOrEqual(163)
+        expect(totalCount).toBeLessThanOrEqual(141)
         expect(transactions).toBeLessThanOrEqual(24)
         expect(dump.events.length).toBeGreaterThan(0)
         expect(dump.messages.length).toBeGreaterThan(0)

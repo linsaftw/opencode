@@ -348,7 +348,8 @@ export function configured(options?: Options) {
                   .transaction(
                     () =>
                       Effect.gen(function* () {
-                        const row = yield* sequenceRow.get({ aggregateID }).pipe(Effect.orDie)
+                        // Only a replay needs the stored sequence; a live append takes its seq from the upsert below.
+                        const row = input ? yield* sequenceRow.get({ aggregateID }).pipe(Effect.orDie) : undefined
                         const latest = row?.seq ?? -1
                         const encode = () =>
                           Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
@@ -395,7 +396,20 @@ export function configured(options?: Options) {
                         if (input && row?.ownerID && row.ownerID !== input.ownerID) {
                           return
                         }
-                        const seq = input?.seq ?? latest + 1
+                        // One statement reserves the next sequence: inserts 0 for a new aggregate, else bumps the stored value.
+                        const seq = input
+                          ? input.seq
+                          : yield* db
+                              .insert(EventSequenceTable)
+                              .values([{ aggregate_id: aggregateID, seq: 0 }])
+                              .onConflictDoUpdate({
+                                target: EventSequenceTable.aggregate_id,
+                                set: { seq: sql`${EventSequenceTable.seq} + 1` },
+                              })
+                              .returning({ seq: EventSequenceTable.seq })
+                              .get()
+                              .pipe(Effect.orDie)
+                              .pipe(Effect.map((reserved) => reserved.seq))
                         if (input && seq !== latest + 1) {
                           yield* Effect.die(
                             new InvalidDurableEventError({
@@ -413,18 +427,19 @@ export function configured(options?: Options) {
                           yield* projector(committed)
                         }
                         if (commit) yield* commit(seq)
-                        yield* db
-                          .insert(EventSequenceTable)
-                          .values([{ aggregate_id: aggregateID, seq, owner_id: input?.ownerID }])
-                          .onConflictDoUpdate({
-                            target: EventSequenceTable.aggregate_id,
-                            set: {
-                              seq: sql`max(${EventSequenceTable.seq}, ${seq})`,
-                              ...(input?.ownerID && row?.ownerID == null ? { owner_id: input.ownerID } : {}),
-                            },
-                          })
-                          .run()
-                          .pipe(Effect.orDie)
+                        if (input)
+                          yield* db
+                            .insert(EventSequenceTable)
+                            .values([{ aggregate_id: aggregateID, seq, owner_id: input.ownerID }])
+                            .onConflictDoUpdate({
+                              target: EventSequenceTable.aggregate_id,
+                              set: {
+                                seq: sql`max(${EventSequenceTable.seq}, ${seq})`,
+                                ...(input.ownerID && row?.ownerID == null ? { owner_id: input.ownerID } : {}),
+                              },
+                            })
+                            .run()
+                            .pipe(Effect.orDie)
                         // The duplicate-id check rides on the insert (no pre-select on the happy path);
                         // the stored row is read only to build the error when the id already exists.
                         if (persist) {
