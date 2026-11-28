@@ -1,3 +1,3 @@
-2026-11-28T01:53:13Z
-install-canonical of 59f6a9991c build (live event sequence reserve 163->141 statements/turn, bounded websocket outboxes, snapshot identical-tree short-circuit, idle/history probes); offline probe PROBE-OK (conversations 2516 ms cold, 26 ms warm). Service not restarted by the installer.
+2026-11-28T07:50:05Z
+install-canonical of d42c9c6c5e build (incremental provider/integration registry rebuilds 609->189 transforms, shared unedited entries warm activation 910->696 ms, per-key models.dev memo); offline probe PROBE-OK (conversations 6409 ms cold, 137 ms warm under load ~30). Service not restarted by the installer.
 baseline: 27 "Background service is unresponsive" warnings in opencode.log.
