@@ -1079,7 +1079,9 @@ export const layer = (options?: Options) =>
 
           // Initial connections stay asynchronous so one slow server does not block Location startup.
           for (const [name, entry] of entries) {
-            if (entry.config.disabled) {
+            // OPENCODE_DISABLE_MCP=1 skips the boot-time spawn of every server for short-lived one-shot runs that
+            // never call an MCP tool. Servers show as disabled and an explicit connect() still starts them.
+            if (entry.config.disabled || process.env.OPENCODE_DISABLE_MCP === "1") {
               advance(entry, { _tag: "Disabled" })
               entry.startup.openUnsafe()
               yield* bus.publish(McpEvent.StatusChanged, { server: name })
