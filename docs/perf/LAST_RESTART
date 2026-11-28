@@ -1,3 +1,2 @@
-2026-11-28T11:08:04Z
-install-canonical of c9787e2c0a build (upstream/dev merged: 46 commits, c9787e2c0a); offline probe PROBE-OK (conversations 3012 ms cold, 57 ms warm). Service not restarted by the installer.
-baseline: opencode.log has 0 "Background service is unresponsive" lines.
+2026-11-28T11:58:14Z
+install-canonical of a14a1529fa build (adds 701fa54570 watcher debug logs, a943a70edf sealed provider infos, 85ebc5dc7c policy early-return); PROBE-OK (conversationMs 7262 cold under load, 88 warm).
