@@ -242,3 +242,6 @@
 ## 2026-11-27e Effect-runtime attribution (docs/perf/PROFILE-2026-11-27e.md; new scripts/perf/cpuprofile-effect-owners.ts)
 - Of 18.2 busy samples/conv, 7.28 are effect-runtime leaves: 3.95 with no repo owner (Scheduler/runLoop), 1.70 under Integration.list (integration.ts:711, about 9% of busy), 0.38 store.ts:149.
 - No span/log/annotate and no Stream frames in the top 80 Effect names; Context.lookup 1.3%; forkUnsafe 16% inclusive. No src change: a Provider.snapshot skip of Integration.list is not provably identical (cross-process credential writes).
+- 2026-11-27f live idle (read-only, pid 1108514): 3.2% CPU over 31 s (w 2.2/3.2/4.2%), main JS thread 66%, GC 13%, ~35 wakeups/s, RSS 604 to 610 MB flat, 207 fds; opencode.db 11.2 GB. strace and perf denied (ptrace_scope=1, perf_event_paranoid=4).
+- Log 200 lines: watcher stopped 57 / subscribe 43 / started 43 per 3 min (155 lines at 00:11); restart loop = three serve --stdio servers killed by SIGTERM ~30 s after start; biggest idle lead: main thread (no function name yet), fix at watcher.ts:105,117 and shutdown-deadline.ts:20. Details: docs/perf/PROFILE-2026-11-27f-live.md.
+- Next unit: name the main-thread hot function via bun --cpu-prof on a copy at a separate port; shrink opencode.db (11.2 GB) growth check.
