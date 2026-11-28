@@ -44,9 +44,13 @@ describe("Location start rebuild probe", () => {
     Effect.gen(function* () {
       const registry = yield* Plugin.Service
       const internal = yield* PluginInternal.list()
+      const cpu = process.cpuUsage()
+      const started = performance.now()
       yield* registry.activate([...internal.pre, ...internal.post])
       const providers = yield* Provider.Service
       const snapshot = yield* providers.snapshot()
+      const used = process.cpuUsage(cpu)
+      console.log(`ACTIVATE wall_ms=${(performance.now() - started).toFixed(1)} cpu_ms=${((used.user + used.system) / 1000).toFixed(1)}`)
       expect(snapshot).toBeDefined()
     }),
   )
