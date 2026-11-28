@@ -370,6 +370,20 @@ const layer = Layer.effect(
           ),
         () => bus.publish(Integration.Event.Updated, {}).pipe(Effect.asVoid),
       ),
+      // Refs and methods are plain data that the editor mutates in place; OAuth implementations hold functions and
+      // are only ever replaced by key, so their map is copied and their values shared.
+      copy: (data) => ({
+        integrations: new Map(
+          Array.from(data.integrations, ([id, entry]) => [
+            id,
+            {
+              ref: structuredClone(entry.ref),
+              methods: structuredClone(entry.methods),
+              implementations: new Map(entry.implementations),
+            },
+          ]),
+        ),
+      }),
     })
 
     const sorted = new WeakMap<Map<ID, Entry>, Entry[]>()
