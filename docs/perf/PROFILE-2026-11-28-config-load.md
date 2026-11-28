@@ -30,3 +30,23 @@ Reading: user config costs about 3.8 CPU s (full 7.8 vs empty 4.0). No single pi
 
 ## Next
 Run on an idle machine with interleaved ordering (5+ boots per variant) and `--cpu-prof` on the empty-vs-full pair only. Candidate owners to check: context-mode plugin load (plugin entry), skill source watchers (`packages/core/src/config/plugin/skill.ts:30-150`), and serial BFS in `packages/core/src/config/plugin/skill-scan.ts:11-40`.
+
+## Count profile (2026-11-27, noise-independent attempt)
+
+Method: `bun --cpu-prof --cpu-prof-interval 500 packages/cli/src/index.ts serve --stdio --port 0`, cwd `/tmp/claude-1000/prof11/cwd`, ready line read from stdout, SIGTERM after stdin closed (profile flushes). Full = hardlink copy of `~/.config/opencode` in `/tmp/claude-1000/prof11/config-full`; empty = `config-empty`. Interleaved 3 full + 3 empty. Counts via `scripts/perf/cpuprofile-count-diff.ts` (inclusive, once per sample). Mean samples per profile, delta = full - empty.
+
+Totals: busy (non-idle) samples full 1862/1448/1326 (mean 1545, 2394 busy ms) vs empty 1508/1258/1097 (mean 1288 by count, 1845 busy ms). Busy time is the more stable measure, but the spread is still wide (full 2014-3126 ms), so the delta is about +550 ms (30%), not a stable 3.8 s.
+
+Caveat: `--cpu-prof-interval 500` is not honoured (real spacing ~1.5-2 ms), so the table converts with 1.5 ms per sample. Sampled totals track wall time, so the count still carries load noise. Frames below are inclusive and overlap; do not add them.
+
+| rank | delta samples | ~ms | function | what it is |
+|---|---|---|---|---|
+| 1 | +71.7 | ~108 | effect/internal/effect.js:407 evaluate | Effect runtime interpreting plugin/config layers (library) |
+| 2 | +66.3 | ~100 | effect/internal/effect.js:453 runLoop | Effect fiber loop, same boot path (library) |
+| 3 | +58.0 | ~87 | node:async_hooks runInAsyncScope | async context around Effect/plugin work (runtime) |
+| 4 | +43.3 | ~65 | effect/internal/effect.js:832 | Effect success continuation (library) |
+| 5 | +39.7 | ~60 | bound require | plugin/module `require` loads, context-mode and friends (Bun) |
+
+Top in-repo deltas: `packages/cli/src/index.ts:3` import graph +26.7 samples (~40 ms); `packages/plugin/src/runtime-modules.ts:91` createLoader require +14.7; `ensurePluginRuntime` +11.7; `discoverPluginRuntimeSpecifiers` (serial Glob + `Bun.resolveSync` per file of effect and @opencode/plugin, runtime-modules.ts:25-67) +8.3; gray-matter and js-yaml frontmatter parse +8 each (library, skill/agent/command files).
+
+Fix status: none. The top in-repo mechanism is discoverPluginRuntimeSpecifiers, about 12 ms, which is below the noise floor, so no change was made and nothing was reverted. Next step is in docs/perf/LOG.md.
