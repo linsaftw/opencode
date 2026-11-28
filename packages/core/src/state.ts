@@ -162,6 +162,12 @@ export interface Options<State, Editor> {
    * Resource reconciliation owns its execution scope and coordination.
    */
   readonly notify?: (state: State) => Effect.Effect<void>
+  /**
+   * Opt-in incremental rebuild. Must return a deep, unfrozen copy whose editor-visible content equals the
+   * input, so that appending transforms onto it matches a replay from `initial()`. Without it, every rebuild
+   * replays all transforms. Only transform appends take this path; removal, reload() and invalidate() replay.
+   */
+  readonly copy?: (state: State) => State
 }
 
 export interface Interface<State, Editor> extends Transformable<Editor> {
@@ -182,8 +188,18 @@ export function create<State, Editor>(options: Options<State, Editor>): Interfac
   let dirty = false
   let closed = false
   let version = 0
+  // `state` folds the first `applied` transforms in Set order. While `appendOnly` holds, every change
+  // since that build appended transforms to the end, so the cached prefix is still valid.
+  let applied = 0
+  let appendOnly = true
 
   const invalidate = () => {
+    appendOnly = false
+    dirty = true
+    version++
+  }
+
+  const append = () => {
     dirty = true
     version++
   }
@@ -192,9 +208,16 @@ export function create<State, Editor>(options: Options<State, Editor>): Interfac
     if (closed || !dirty) return state
     while (true) {
       const started = version
-      const next = options.initial()
+      const copy = options.copy
+      const reuse = copy !== undefined && appendOnly
+      const next = copy && reuse ? copy(state) : options.initial()
       const editor = options.editor(next)
+      let skip = reuse ? applied : 0
       for (const transform of transforms) {
+        if (skip > 0) {
+          skip--
+          continue
+        }
         try {
           transform.run(editor)
         } catch (cause) {
@@ -207,6 +230,8 @@ export function create<State, Editor>(options: Options<State, Editor>): Interfac
       if (version !== started) continue
       // Ungrouped failures still propagate; grouped failures restart from a fresh candidate.
       state = next
+      applied = transforms.size
+      appendOnly = true
       dirty = false
       return state
     }
@@ -219,22 +244,25 @@ export function create<State, Editor>(options: Options<State, Editor>): Interfac
     if (options.notify) yield* options.notify(value)
   }).pipe(Effect.withSpan("State.notify"))
 
-  const changed = Effect.uninterruptibleMask((restore) =>
-    Effect.gen(function* () {
-      if (closed) return
-      invalidate()
-      const batch = yield* CurrentBatch
-      if (batch?.active) {
-        if (batch.shutdown) {
-          closed = true
+  const changedBy = (mark: () => void) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        if (closed) return
+        mark()
+        const batch = yield* CurrentBatch
+        if (batch?.active) {
+          if (batch.shutdown) {
+            closed = true
+            return
+          }
+          batch.notifications.add(notify)
           return
         }
-        batch.notifications.add(notify)
-        return
-      }
-      yield* restore(notify)
-    }),
-  )
+        yield* restore(notify)
+      }),
+    )
+  const changed = changedBy(invalidate)
+  const appended = changedBy(append)
 
   return {
     get,
@@ -261,7 +289,7 @@ export function create<State, Editor>(options: Options<State, Editor>): Interfac
           transforms.add(transform)
           group?.registrations.add(registration)
           yield* Scope.addFinalizer(scope, dispose)
-          yield* changed
+          yield* appended
           return { dispose }
         }),
       )

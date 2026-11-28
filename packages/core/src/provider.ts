@@ -456,6 +456,9 @@ const layer = Layer.effect(
         }
       },
       notify: () => notify,
+      // Model maps are copy-on-write per editor, and the editor only mutates provider records it owns.
+      copy: (records) =>
+        new Map(Array.from(records, ([id, record]) => [id, { ...record, provider: structuredClone(record.provider) }])),
     })
     // Registrations may outlive a borrowed service layer; their later disposal must
     // not query dependencies that have already closed.
