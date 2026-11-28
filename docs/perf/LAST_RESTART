@@ -1,3 +1,3 @@
-2026-11-28T08:38:34Z
-install-canonical of 93ce51f131 build (bundled catalog decode skipped on models.dev memo hit, on top of the 07:50Z registry changes); offline probe PROBE-OK (conversations 10621 ms cold under load ~30, 128 ms warm). Service not restarted by the installer.
-baseline: 27 "Background service is unresponsive" warnings in opencode.log.
+2026-11-28T11:08:04Z
+install-canonical of c9787e2c0a build (upstream/dev merged: 46 commits, c9787e2c0a); offline probe PROBE-OK (conversations 3012 ms cold, 57 ms warm). Service not restarted by the installer.
+baseline: opencode.log has 0 "Background service is unresponsive" lines.
