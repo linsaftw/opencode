@@ -238,3 +238,7 @@
 - 2026-11-27 ordinal select (projector.ts:629 prepareAssistantParts, 10/turn): EXPLAIN QUERY PLAN shows both lookups already covered (session_message PK id=?; session_part PK autoindex message_id=? via COVERING INDEX), so no index is added. Baseline 6-run median: 163 stmts, 24 tx, 19.14 ms total, ordinal group 2.49 ms (13%).
 - Batching next-ordinal per projector batch rejected: needs invalidation on every session_part write and still keeps the session_message prepare statement, so the saving is only the subquery cost; no src change, persisted rows untouched.
 - Probe: packages/core/test/perf-session-turn-sql.test.ts (PROBE_OUT) passes 6/6; next lever is folding the prepare select into the append insert (-10 stmts), not measured.
+
+## 2026-11-27e Effect-runtime attribution (docs/perf/PROFILE-2026-11-27e.md; new scripts/perf/cpuprofile-effect-owners.ts)
+- Of 18.2 busy samples/conv, 7.28 are effect-runtime leaves: 3.95 with no repo owner (Scheduler/runLoop), 1.70 under Integration.list (integration.ts:711, about 9% of busy), 0.38 store.ts:149.
+- No span/log/annotate and no Stream frames in the top 80 Effect names; Context.lookup 1.3%; forkUnsafe 16% inclusive. No src change: a Provider.snapshot skip of Integration.list is not provably identical (cross-process credential writes).
