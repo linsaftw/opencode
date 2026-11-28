@@ -163,9 +163,10 @@ export interface Options<State, Editor> {
    */
   readonly notify?: (state: State) => Effect.Effect<void>
   /**
-   * Opt-in incremental rebuild. Must return a deep, unfrozen copy whose editor-visible content equals the
-   * input, so that appending transforms onto it matches a replay from `initial()`. Without it, every rebuild
-   * replays all transforms. Only transform appends take this path; removal, reload() and invalidate() replay.
+   * Opt-in incremental rebuild. Returns a candidate whose editor-visible content equals the input, so that
+   * appending transforms onto it matches a replay from `initial()`. The candidate may share parts with the input,
+   * so the editor must clone a shared part before writing to it; the input is never written to. Without it, every
+   * rebuild replays all transforms. Only transform appends take this path; removal, reload() and invalidate() replay.
    */
   readonly copy?: (state: State) => State
 }

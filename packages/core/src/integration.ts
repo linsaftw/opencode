@@ -324,14 +324,21 @@ const layer = Layer.effect(
       name: "integration",
       initial: () => ({ integrations: new Map<ID, Entry>() }),
       editor: (editor) => {
+        // Entries inherited from the previous value are shared until this editor first writes to them.
+        const owned = new WeakSet<Entry>()
         const ensure = (id: ID): Entry => {
-          const current = editor.integrations.get(id) ?? {
-            ref: { id, name: id },
-            methods: [],
-            implementations: new Map(),
-          }
-          if (!editor.integrations.has(id)) editor.integrations.set(id, current)
-          return current
+          const current = editor.integrations.get(id)
+          if (current && owned.has(current)) return current
+          const entry: Entry = current
+            ? {
+                ref: structuredClone(current.ref),
+                methods: structuredClone(current.methods),
+                implementations: new Map(current.implementations),
+              }
+            : { ref: { id, name: id }, methods: [], implementations: new Map() }
+          owned.add(entry)
+          editor.integrations.set(id, entry)
+          return entry
         }
         return {
           list: () => Array.from(editor.integrations.values(), (entry) => entry.ref),
@@ -354,8 +361,8 @@ const layer = Layer.effect(
               }
             },
             remove: (integrationID, method) => {
-              const current = editor.integrations.get(integrationID)
-              if (!current) return
+              if (!editor.integrations.has(integrationID)) return
+              const current = ensure(integrationID)
               const index = current.methods.findIndex((candidate) => sameMethod(candidate, method))
               if (index !== -1) current.methods.splice(index, 1)
               if (method.type === "oauth") current.implementations.delete(method.id)
@@ -370,20 +377,9 @@ const layer = Layer.effect(
           ),
         () => bus.publish(Integration.Event.Updated, {}).pipe(Effect.asVoid),
       ),
-      // Refs and methods are plain data that the editor mutates in place; OAuth implementations hold functions and
-      // are only ever replaced by key, so their map is copied and their values shared.
-      copy: (data) => ({
-        integrations: new Map(
-          Array.from(data.integrations, ([id, entry]) => [
-            id,
-            {
-              ref: structuredClone(entry.ref),
-              methods: structuredClone(entry.methods),
-              implementations: new Map(entry.implementations),
-            },
-          ]),
-        ),
-      }),
+      // Entries are shared and cloned on first write by the editor. OAuth implementations hold functions and
+      // are only ever replaced by key, so their values are never cloned.
+      copy: (data) => ({ integrations: new Map(data.integrations) }),
     })
 
     const sorted = new WeakMap<Map<ID, Entry>, Entry[]>()

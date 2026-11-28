@@ -122,6 +122,24 @@ describe("Provider and Model", () => {
     }),
   )
 
+  it.effect("keeps earlier provider reads unchanged when later transforms edit shared records", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      const first = Provider.ID.make("shared-first")
+      const second = Provider.ID.make("shared-second")
+      yield* providers.transform((editor) => editor.update(first, (provider) => void (provider.name = "First")))
+      const before = yield* providers.get(first)
+      yield* providers.transform((editor) => editor.update(second, (provider) => void (provider.name = "Second")))
+      yield* providers.transform((editor) => editor.update(first, (provider) => void (provider.name = "First v2")))
+
+      expect(before).toMatchObject({ name: "First" })
+      expect(yield* providers.get(first)).toMatchObject({ name: "First v2" })
+      const incremental = yield* providers.all()
+      yield* providers.reload()
+      expect(incremental).toEqual(yield* providers.all())
+    }),
+  )
+
   it.effect("derives availability from active credentials without changing provider state", () => {
     const integrationID = Integration.ID.make("test")
     const localProviderLayer = Layer.fresh(

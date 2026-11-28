@@ -379,16 +379,27 @@ const layer = Layer.effect(
       editor: (records) => {
         const maps = new WeakSet<ReadonlyMap<Model.ID, Model.Info>>()
         const models = new WeakSet<Model.Info>()
+        // Records inherited from the previous value are shared until this editor first writes to them.
+        const ownedRecords = new WeakSet<object>()
         const entry = (id: ID) => {
           const current = records.get(id)
           if (current) return current
           const added = { provider: Info.empty(id) as MutableInfo, models: new Map<Model.ID, Model.Info>() }
           records.set(id, added)
+          ownedRecords.add(added)
           maps.add(added.models)
           return added
         }
+        const own = (id: ID) => {
+          const current = entry(id)
+          if (ownedRecords.has(current)) return current
+          const cloned = { ...current, provider: structuredClone(current.provider) }
+          records.set(id, cloned)
+          ownedRecords.add(cloned)
+          return cloned
+        }
         const writable = (id: ID) => {
-          const record = entry(id)
+          const record = own(id)
           if (maps.has(record.models)) return record.models as Map<Model.ID, Model.Info>
           const owned = new Map(record.models)
           record.models = owned
@@ -399,14 +410,16 @@ const layer = Layer.effect(
           list: () => Array.from(records.values()),
           get: (id) => records.get(id),
           add: (definition) => {
-            records.set(definition.info.id, {
+            const added = {
               provider: structuredClone(definition.info) as MutableInfo,
               models: index(definition.info.id, definition.models),
               sourceConnection: definition.sourceConnection,
-            })
+            }
+            records.set(definition.info.id, added)
+            ownedRecords.add(added)
           },
           update: (id, update) => {
-            const record = entry(id)
+            const record = own(id)
             update(record.provider)
             record.provider.id = id
             AISDKNative.rewrite(record.provider, {
@@ -421,10 +434,10 @@ const layer = Layer.effect(
           },
           models: {
             set: (id, values) => {
-              entry(id).models = index(id, values)
+              own(id).models = index(id, values)
             },
             update: (providerID, modelID, update) => {
-              const record = entry(providerID)
+              const record = own(providerID)
               const target = writable(providerID)
               const current = target.get(modelID)
               const model = // An earlier add/set can publish and freeze an owned model within this fold.
@@ -456,9 +469,8 @@ const layer = Layer.effect(
         }
       },
       notify: () => notify,
-      // Model maps are copy-on-write per editor, and the editor only mutates provider records it owns.
-      copy: (records) =>
-        new Map(Array.from(records, ([id, record]) => [id, { ...record, provider: structuredClone(record.provider) }])),
+      // Model maps are copy-on-write per editor, and the editor clones a shared record before writing to it.
+      copy: (records) => new Map(records),
     })
     // Registrations may outlive a borrowed service layer; their later disposal must
     // not query dependencies that have already closed.
