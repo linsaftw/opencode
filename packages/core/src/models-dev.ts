@@ -828,57 +828,68 @@ export const layer = (options?: Options) =>
       // entries instead of evicting each other. The key covers the catalog digest, today's date (service-tier
       // multipliers depend on it), and the binary and source identity. A write keeps the newest 4 files per flag. A
       // missing, unreadable or mismatched file rebuilds it.
-      const normalizeMemo = Effect.fnUntraced(function* (
+      // The catalog arrives as a thunk so a memo hit never decodes the multi-MB body it would not use.
+      const normalizeMemo = <E, R>(
         digest: string | undefined,
-        catalog: Record<string, unknown>,
+        catalog: () => Effect.Effect<Record<string, unknown>, E, R>,
         recommended: boolean,
-      ) {
-        if (digest === undefined) return yield* normalize(catalog, recommended)
-        const binary = Bun.file(process.execPath)
-        const source = Bun.file(new URL(import.meta.url))
-        const today = new Date().toISOString().slice(0, 10)
-        const key = Hash.sha256(
-          [NORMALIZED_VERSION, binary.size, binary.lastModified, source.size, source.lastModified, today, recommended, digest].join("\n"),
-        )
-        const dir = path.join(global.cache, "models-dev")
-        const prefix = recommended ? "normalized-recommended" : "normalized"
-        const file = path.join(dir, `${prefix}-${key.slice(0, 16)}.json`)
-        const text = yield* fs.readFileStringSafe(file).pipe(Effect.orElseSucceed(() => undefined))
-        const stored = text === undefined ? undefined : Option.getOrUndefined(decodeStoredNormalized(text))
-        if (stored?.key === key) return stored.snapshots as readonly Snapshot[]
-        const snapshots = yield* normalize(catalog, recommended)
-        const memoName = new RegExp(`^${prefix}-[0-9a-f]{16}\\.json$`)
-        yield* fs.writeWithDirs(file, JSON.stringify({ key, snapshots })).pipe(
-          Effect.andThen(
-            Effect.gen(function* () {
-              // The pre-per-key single file is no longer read; drop it so it does not linger.
-              yield* fs.remove(path.join(dir, `${prefix}.json`), { force: true })
-              const names = (yield* fs.readDirectory(dir)).filter((name) => memoName.test(name))
-              const entries = yield* Effect.forEach(names, (name) =>
-                Effect.map(fs.stat(path.join(dir, name)), (info) => ({
-                  name,
-                  mtime: Option.getOrElse(info.mtime, () => new Date(0)).getTime(),
-                })),
-              )
-              yield* Effect.forEach(
-                entries.toSorted((a, b) => b.mtime - a.mtime).slice(4),
-                (entry) => fs.remove(path.join(dir, entry.name)),
-                { discard: true },
-              )
-            }),
-          ),
-          Effect.ignore,
-        )
-        return snapshots
-      })
+      ) =>
+        Effect.gen(function* () {
+          if (digest === undefined)
+            return yield* catalog().pipe(Effect.flatMap((value) => normalize(value, recommended)))
+          const binary = Bun.file(process.execPath)
+          const source = Bun.file(new URL(import.meta.url))
+          const today = new Date().toISOString().slice(0, 10)
+          const key = Hash.sha256(
+            [
+              NORMALIZED_VERSION,
+              binary.size,
+              binary.lastModified,
+              source.size,
+              source.lastModified,
+              today,
+              recommended,
+              digest,
+            ].join("\n"),
+          )
+          const dir = path.join(global.cache, "models-dev")
+          const prefix = recommended ? "normalized-recommended" : "normalized"
+          const file = path.join(dir, `${prefix}-${key.slice(0, 16)}.json`)
+          const text = yield* fs.readFileStringSafe(file).pipe(Effect.orElseSucceed(() => undefined))
+          const stored = text === undefined ? undefined : Option.getOrUndefined(decodeStoredNormalized(text))
+          if (stored?.key === key) return stored.snapshots as readonly Snapshot[]
+          const snapshots = yield* catalog().pipe(Effect.flatMap((value) => normalize(value, recommended)))
+          const memoName = new RegExp(`^${prefix}-[0-9a-f]{16}\\.json$`)
+          yield* fs.writeWithDirs(file, JSON.stringify({ key, snapshots })).pipe(
+            Effect.andThen(
+              Effect.gen(function* () {
+                // The pre-per-key single file is no longer read; drop it so it does not linger.
+                yield* fs.remove(path.join(dir, `${prefix}.json`), { force: true })
+                const names = (yield* fs.readDirectory(dir)).filter((name) => memoName.test(name))
+                const entries = yield* Effect.forEach(names, (name) =>
+                  Effect.map(fs.stat(path.join(dir, name)), (info) => ({
+                    name,
+                    mtime: Option.getOrElse(info.mtime, () => new Date(0)).getTime(),
+                  })),
+                )
+                yield* Effect.forEach(
+                  entries.toSorted((a, b) => b.mtime - a.mtime).slice(4),
+                  (entry) => fs.remove(path.join(dir, entry.name)),
+                  { discard: true },
+                )
+              }),
+            ),
+            Effect.ignore,
+          )
+          return snapshots
+        })
 
       const bundledSnapshot = (recommended: boolean) =>
         Effect.suspend(() => {
           const cached = bundledCache.get(recommended)
           return cached
             ? Effect.succeed(cached)
-            : decodeCatalog(snapshotText).pipe(
-                Effect.flatMap((catalog) => normalizeMemo(bodyDigest(snapshotText), catalog, recommended)),
+            : normalizeMemo(bodyDigest(snapshotText), () => decodeCatalog(snapshotText), recommended).pipe(
                 Effect.tap((snapshot) => Effect.sync(() => bundledCache.set(recommended, snapshot))),
               )
         })
@@ -917,7 +928,7 @@ export const layer = (options?: Options) =>
         const fromFile = yield* loadFromFile
         if (fromFile) return yield* normalize(fromFile, recommended)
         const cached = options?.file ? undefined : yield* loadFromCache()
-        if (cached) return yield* normalizeMemo(cached.digest, cached.catalog, recommended)
+        if (cached) return yield* normalizeMemo(cached.digest, () => Effect.succeed(cached.catalog), recommended)
         // The bundled snapshot is the boot-time floor until the periodic fetch refreshes it.
         const bundled = options?.snapshot === false ? undefined : yield* bundledSnapshot(recommended)
         if (bundled) return bundled
