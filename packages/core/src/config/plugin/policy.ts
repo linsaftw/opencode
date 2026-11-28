@@ -56,6 +56,8 @@ export const Plugin = define({
     const runSync = Effect.runSyncWith(yield* Effect.context())
     yield* ctx.provider.transform((providers) => {
       const statements = policies()
+      // Without statements every decision is "allow", so skip the per-provider scan and the supplier map.
+      if (statements.length === 0) return
       // A provider a well-known origin defines belongs to that origin; others to their own integration.
       const suppliers = ConfigIntegration.suppliers(loaded.entries)
       const denied: string[] = []
@@ -76,6 +78,7 @@ export const Plugin = define({
     // Every built-in web search provider shares its integration's ID.
     yield* websearch.transform((editor) => {
       const statements = policies()
+      if (statements.length === 0) return
       for (const provider of editor.list()) {
         if (
           ManagedPolicy.decision(statements, "websearch.use", provider.id) === "deny" ||
@@ -86,12 +89,14 @@ export const Plugin = define({
     })
     yield* ctx.mcp.transform((servers) => {
       const statements = policies()
+      if (statements.length === 0) return
       for (const [name] of servers.list()) {
         if (ManagedPolicy.decision(statements, "mcp.use", name) === "deny") servers.remove(name)
       }
     })
     yield* ctx.skill.transform((skills) => {
       const statements = policies()
+      if (statements.length === 0) return
       for (const skill of skills.list()) {
         if (ManagedPolicy.decision(statements, "skill.use", skill.id) === "deny") skills.remove(skill.id)
       }
